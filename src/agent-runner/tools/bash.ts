@@ -3,6 +3,8 @@ import { promisify } from 'util';
 import { z } from 'zod';
 import { tool } from 'ai';
 
+import { resolveWorkspacePath, WorkspaceContext } from '../workspace-paths.js';
+
 const execAsync = promisify(exec);
 
 const SECRET_ENV_VARS = [
@@ -20,7 +22,7 @@ function buildSanitizedEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-export function createBashTool() {
+export function createBashTool(ctx: WorkspaceContext) {
   return tool({
     description: 'Run a shell command inside the group workspace.',
     inputSchema: z.object({
@@ -37,14 +39,27 @@ export function createBashTool() {
       timeout?: number;
     }) => {
       const { command, workdir, timeout } = input;
-      const cwd = workdir || '/workspace/group';
+      const resolved = resolveWorkspacePath(
+        workdir || '/workspace/group',
+        ctx,
+        {
+          allowProject: ctx.isMain,
+          allowGlobal: !ctx.isMain,
+          defaultCwd: ctx.groupDir,
+        },
+      );
+
+      if (!resolved.resolvedPath) {
+        return { stdout: '', stderr: resolved.error, exitCode: 1 };
+      }
+
       const env = buildSanitizedEnv();
       const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
       const finalCommand = unsetPrefix + command;
 
       try {
         const { stdout, stderr } = await execAsync(finalCommand, {
-          cwd,
+          cwd: resolved.resolvedPath,
           env,
           timeout: timeout ?? 120000,
           maxBuffer: 10 * 1024 * 1024,

@@ -4,14 +4,21 @@ import fg from 'fast-glob';
 import { z } from 'zod';
 import { tool } from 'ai';
 
-const DEFAULT_CWD = '/workspace/group';
+import { resolveWorkspacePath, WorkspaceContext } from '../workspace-paths.js';
 
-function resolvePath(targetPath: string, cwd?: string): string {
-  if (path.isAbsolute(targetPath)) return targetPath;
-  return path.join(cwd || DEFAULT_CWD, targetPath);
+function resolvePath(
+  inputPath: string,
+  ctx: WorkspaceContext,
+  options: { allowGlobal?: boolean; allowProject?: boolean } = {},
+): { resolvedPath?: string; error?: string } {
+  return resolveWorkspacePath(inputPath, ctx, {
+    allowProject: options.allowProject ?? ctx.isMain,
+    allowGlobal: options.allowGlobal ?? !ctx.isMain,
+    defaultCwd: ctx.groupDir,
+  });
 }
 
-export function createFsTools() {
+export function createFsTools(ctx: WorkspaceContext) {
   return {
     Read: tool({
       description: 'Read a file or directory from disk.',
@@ -25,17 +32,24 @@ export function createFsTools() {
         offset?: number;
         limit?: number;
       }) => {
-        const filePath = resolvePath(input.path);
-        const stat = fs.statSync(filePath);
+        const resolved = resolvePath(input.path, ctx, {
+          allowGlobal: !ctx.isMain,
+          allowProject: ctx.isMain,
+        });
+        if (!resolved.resolvedPath) {
+          return { error: resolved.error };
+        }
+
+        const stat = fs.statSync(resolved.resolvedPath);
         if (stat.isDirectory()) {
-          const entries = fs.readdirSync(filePath).map((entry) => {
-            const full = path.join(filePath, entry);
+          const entries = fs.readdirSync(resolved.resolvedPath).map((entry) => {
+            const full = path.join(resolved.resolvedPath as string, entry);
             return fs.statSync(full).isDirectory() ? `${entry}/` : entry;
           });
           return { entries };
         }
 
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
         const lines = content.split('\n');
         const offset = Math.max((input.offset || 1) - 1, 0);
         const limit = input.limit ?? lines.length;
@@ -54,10 +68,16 @@ export function createFsTools() {
         content: z.string().describe('File contents'),
       }),
       execute: async (input: { path: string; content: string }) => {
-        const filePath = resolvePath(input.path);
-        fs.mkdirSync(path.dirname(filePath), { recursive: true });
-        fs.writeFileSync(filePath, input.content);
-        return { path: filePath };
+        const resolved = resolvePath(input.path, ctx, {
+          allowGlobal: false,
+          allowProject: ctx.isMain,
+        });
+        if (!resolved.resolvedPath) {
+          return { error: resolved.error };
+        }
+        fs.mkdirSync(path.dirname(resolved.resolvedPath), { recursive: true });
+        fs.writeFileSync(resolved.resolvedPath, input.content);
+        return { path: resolved.resolvedPath };
       },
     }),
     Edit: tool({
@@ -72,8 +92,14 @@ export function createFsTools() {
         oldText: string;
         newText: string;
       }) => {
-        const filePath = resolvePath(input.path);
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const resolved = resolvePath(input.path, ctx, {
+          allowGlobal: false,
+          allowProject: ctx.isMain,
+        });
+        if (!resolved.resolvedPath) {
+          return { error: resolved.error };
+        }
+        const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
         const idx = content.indexOf(input.oldText);
         if (idx === -1) {
           return { error: 'Old text not found' };
@@ -82,8 +108,8 @@ export function createFsTools() {
           content.slice(0, idx) +
           input.newText +
           content.slice(idx + input.oldText.length);
-        fs.writeFileSync(filePath, updated);
-        return { path: filePath };
+        fs.writeFileSync(resolved.resolvedPath, updated);
+        return { path: resolved.resolvedPath };
       },
     }),
     Glob: tool({
@@ -93,9 +119,15 @@ export function createFsTools() {
         cwd: z.string().optional().describe('Working directory'),
       }),
       execute: async (input: { pattern: string; cwd?: string }) => {
-        const cwd = input.cwd || DEFAULT_CWD;
+        const resolved = resolvePath(input.cwd || '/workspace/group', ctx, {
+          allowGlobal: !ctx.isMain,
+          allowProject: ctx.isMain,
+        });
+        if (!resolved.resolvedPath) {
+          return { error: resolved.error, matches: [] };
+        }
         const matches = await fg(input.pattern, {
-          cwd,
+          cwd: resolved.resolvedPath,
           dot: true,
           onlyFiles: false,
         });
@@ -114,10 +146,16 @@ export function createFsTools() {
         path?: string;
         include?: string;
       }) => {
-        const cwd = input.path ? resolvePath(input.path) : DEFAULT_CWD;
+        const resolved = resolvePath(input.path || '/workspace/group', ctx, {
+          allowGlobal: !ctx.isMain,
+          allowProject: ctx.isMain,
+        });
+        if (!resolved.resolvedPath) {
+          return { error: resolved.error, matches: [] };
+        }
         const globPattern = input.include || '**/*';
         const files = await fg(globPattern, {
-          cwd,
+          cwd: resolved.resolvedPath,
           dot: true,
           onlyFiles: true,
         });
@@ -125,7 +163,7 @@ export function createFsTools() {
         const matches: Array<{ file: string; line: number; text: string }> = [];
 
         for (const file of files) {
-          const fullPath = path.join(cwd, file);
+          const fullPath = path.join(resolved.resolvedPath, file);
           const content = fs.readFileSync(fullPath, 'utf-8');
           const lines = content.split('\n');
           lines.forEach((line, index) => {

@@ -4,23 +4,8 @@ import { GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  MAX_CONCURRENT_CONTAINERS: 2,
+  MAX_CONCURRENT_RUNS: 2,
 }));
-
-// Mock fs operations used by sendMessage/closeStdin
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs');
-  return {
-    ...actual,
-    default: {
-      ...actual,
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn(),
-      renameSync: vi.fn(),
-    },
-  };
-});
 
 describe('GroupQueue', () => {
   let queue: GroupQueue;
@@ -36,7 +21,7 @@ describe('GroupQueue', () => {
 
   // --- Single group at a time ---
 
-  it('only runs one container per group at a time', async () => {
+  it('only runs one agent run per group at a time', async () => {
     let concurrentCount = 0;
     let maxConcurrent = 0;
 
@@ -87,7 +72,7 @@ describe('GroupQueue', () => {
     // Let promises settle
     await vi.advanceTimersByTimeAsync(10);
 
-    // Only 2 should be active (MAX_CONCURRENT_CONTAINERS = 2)
+    // Only 2 should be active (MAX_CONCURRENT_RUNS = 2)
     expect(maxActive).toBe(2);
     expect(activeCount).toBe(2);
 

@@ -11,20 +11,15 @@ import {
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
-  ContainerOutput,
-  runContainerAgent,
-  writeGroupsSnapshot,
-  writeTasksSnapshot,
-} from './container-runner.js';
-import {
-  cleanupOrphans,
-  ensureContainerRuntimeRunning,
-} from './container-runtime.js';
+  AgentOutput,
+  AgentInput,
+  AvailableGroup,
+  createAgentRuntime,
+} from './agent-runner/runtime.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
-  getAllTasks,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -36,7 +31,6 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -54,6 +48,20 @@ let messageLoopRunning = false;
 let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const agentRuntime = createAgentRuntime({
+  sendMessage: async (jid, text) => {
+    const channel = findChannel(channels, jid);
+    if (!channel) {
+      throw new Error(`No channel for JID: ${jid}`);
+    }
+    await channel.sendMessage(jid, text);
+  },
+  registerGroup,
+  getRegisteredGroups: () => registeredGroups,
+});
+
+queue.setPipeMessageFn(agentRuntime.pipeMessage);
+queue.setCloseFn(agentRuntime.close);
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -95,7 +103,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
  */
-export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
+export function getAvailableGroups(): AvailableGroup[] {
   const chats = getAllChats();
   const registeredJids = new Set(Object.keys(registeredGroups));
 
@@ -169,10 +177,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
+      logger.debug({ group: group.name }, 'Idle timeout, closing agent run');
       queue.closeStdin(chatJid);
     }, IDLE_TIMEOUT);
   };
@@ -234,50 +239,13 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
+  onOutput?: (output: AgentOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
-  // Update tasks snapshot for container to read (filtered by group)
-  const tasks = getAllTasks();
-  writeTasksSnapshot(
-    group.folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
-
-  // Update available groups snapshot (main group only can see all groups)
-  const availableGroups = getAvailableGroups();
-  writeGroupsSnapshot(
-    group.folder,
-    isMain,
-    availableGroups,
-    new Set(Object.keys(registeredGroups)),
-  );
-
-  // Wrap onOutput to track session ID from streamed results
-  const wrappedOnOutput = onOutput
-    ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
-        await onOutput(output);
-      }
-    : undefined;
-
   try {
-    const output = await runContainerAgent(
-      group,
+    const output = await runAgentInput(
       {
         prompt,
         sessionId,
@@ -287,9 +255,7 @@ async function runAgent(
         modelProvider: group.modelProvider,
         modelName: group.modelName,
       },
-      (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
-      wrappedOnOutput,
+      onOutput,
     );
 
     if (output.newSessionId) {
@@ -298,10 +264,7 @@ async function runAgent(
     }
 
     if (output.status === 'error') {
-      logger.error(
-        { group: group.name, error: output.error },
-        'Container agent error',
-      );
+      logger.error({ group: group.name, error: output.error }, 'Agent error');
       return 'error';
     }
 
@@ -310,6 +273,28 @@ async function runAgent(
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
+}
+
+async function runAgentInput(
+  input: AgentInput,
+  onOutput?: (output: AgentOutput) => Promise<void>,
+): Promise<AgentOutput> {
+  const wrappedOnOutput = onOutput
+    ? async (output: AgentOutput) => {
+        if (output.newSessionId) {
+          sessions[input.groupFolder] = output.newSessionId;
+          setSession(input.groupFolder, output.newSessionId);
+        }
+        await onOutput(output);
+      }
+    : undefined;
+
+  const output = await agentRuntime.run(input, wrappedOnOutput);
+  if (output.newSessionId) {
+    sessions[input.groupFolder] = output.newSessionId;
+    setSession(input.groupFolder, output.newSessionId);
+  }
+  return output;
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -387,15 +372,15 @@ async function startMessageLoop(): Promise<void> {
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
+              'Piped messages to active agent run',
             );
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
+            // Show typing indicator while the agent processes the piped message
             channel.setTyping?.(chatJid, true);
           } else {
-            // No active container — enqueue for a new one
+            // No active run — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
           }
         }
@@ -425,13 +410,7 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
-}
-
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
@@ -469,8 +448,7 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    runAgent: runAgentInput,
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -480,20 +458,6 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
-  });
-  startIpcWatcher({
-    sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
-    },
-    registeredGroups: () => registeredGroups,
-    registerGroup,
-    syncGroupMetadata: (force) =>
-      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
-    getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) =>
-      writeGroupsSnapshot(gf, im, ag, rj),
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

@@ -69,6 +69,7 @@ Talk to your assistant with the trigger word (default: `@Andy`):
 ```
 
 From the main channel (your self-chat), you can manage groups and tasks:
+
 ```
 @Andy list all scheduled tasks across groups
 @Andy pause the Monday briefing task
@@ -116,14 +117,17 @@ Users then run `/add-telegram` on their fork and get clean code that does exactl
 Skills we'd love to see:
 
 **Communication Channels**
+
 - `/add-telegram` - Add Telegram as channel. Should give the user option to replace WhatsApp or add as additional channel. Also should be possible to add it as a control channel (where it can trigger actions) or just a channel that can be used in actions triggered elsewhere
 - `/add-slack` - Add Slack
 - `/add-discord` - Add Discord
 
 **Platform Support**
+
 - `/setup-windows` - Windows via WSL2 + Docker
 
 **Session Management**
+
 - `/add-clear` - Add a `/clear` command that compacts the conversation (summarizes context while preserving critical information in the same session). Requires figuring out how to trigger compaction programmatically via the Claude Agent SDK.
 
 ## Requirements
@@ -131,23 +135,22 @@ Skills we'd love to see:
 - macOS or Linux
 - Node.js 20+
 - [Claude Code](https://claude.ai/download)
-- [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
 
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+WhatsApp (baileys) --> SQLite --> Polling loop --> Host Agent Runtime --> Response
 ```
 
-Single Node.js process. Agents execute in isolated Linux containers with mounted directories. Per-group message queue with concurrency control. IPC via filesystem.
+Single Node.js process. Agents execute directly in the host process with live piped messages and per-group concurrency control.
 
 Key files:
+
 - `src/index.ts` - Orchestrator: state, message loop, agent invocation
 - `src/channels/whatsapp.ts` - WhatsApp connection, auth, send/receive
-- `src/ipc.ts` - IPC watcher and task processing
+- `src/agent-runner/runtime.ts` - Host agent runtime (streaming, tools, live piping)
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
-- `src/container-runner.ts` - Spawns streaming agent containers
 - `src/task-scheduler.ts` - Runs scheduled tasks
 - `src/db.ts` - SQLite operations (messages, groups, sessions, state)
 - `groups/*/CLAUDE.md` - Per-group memory
@@ -158,17 +161,13 @@ Key files:
 
 Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
 
-**Why Docker?**
-
-Docker provides cross-platform support (macOS and Linux) and a mature ecosystem. On macOS, you can optionally switch to Apple Container via `/convert-to-apple-container` for a lighter-weight native runtime.
-
 **Can I run this on Linux?**
 
-Yes. Docker is the default runtime and works on both macOS and Linux. Just run `/setup`.
+Yes. It runs directly on the host Node.js process on macOS or Linux.
 
 **Is this secure?**
 
-Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. You should still review what you're running, but the codebase is small enough that you actually can. See [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
+Agents run in the host process. There is no container sandboxing, so treat the agent as having access to your repo and host account. See [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
 
 **Why no configuration files?**
 

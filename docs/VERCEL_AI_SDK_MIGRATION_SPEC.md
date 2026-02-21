@@ -1,5 +1,7 @@
 ## Vercel AI SDK Migration Spec
 
+> Note: Container execution was removed. The agent now runs in-process via `src/agent-runner/runtime.ts`.
+
 ### Goal
 
 Migrate NanoClaw from `@anthropic-ai/claude-agent-sdk` to Vercel AI SDK Core while preserving the repo’s core principles: small, understandable, secure-by-isolation, and code-first customization. Remove Agent Teams support. Implement optimistic background compaction at 60% context usage with last two full exchanges preserved.
