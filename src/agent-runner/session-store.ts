@@ -42,6 +42,17 @@ function getSessionPath(groupFolder: string): string {
   return path.join(getStoreDir(groupFolder), 'session.json');
 }
 
+export function clearSession(groupFolder: string): void {
+  const sessionPath = getSessionPath(groupFolder);
+  try {
+    fs.unlinkSync(sessionPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw err;
+    }
+  }
+}
+
 export function getOrCreateSessionId(groupFolder: string): string {
   const sessionPath = getSessionPath(groupFolder);
   fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
@@ -124,6 +135,38 @@ export function getSessionTokenCount(
     )
     .get(sessionId) as { total: number | null } | undefined;
   return row?.total ?? 0;
+}
+
+export function getSessionMessageCount(
+  groupFolder: string,
+  sessionId: string,
+): number {
+  const database = getDb(groupFolder);
+  const row = database
+    .prepare(
+      `SELECT COUNT(*) as count
+       FROM conversation_history
+       WHERE group_folder = ? AND session_id = ?`,
+    )
+    .get(groupFolder, sessionId) as { count: number } | undefined;
+  return row?.count ?? 0;
+}
+
+export function getSessionLastTimestamp(
+  groupFolder: string,
+  sessionId: string,
+): string | null {
+  const database = getDb(groupFolder);
+  const row = database
+    .prepare(
+      `SELECT created_at
+       FROM conversation_history
+       WHERE group_folder = ? AND session_id = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+    )
+    .get(groupFolder, sessionId) as { created_at: string } | undefined;
+  return row?.created_at ?? null;
 }
 
 export function replaceSessionMessages(
