@@ -77,7 +77,6 @@ function createSchema(database: Database.Database): void {
       folder TEXT NOT NULL UNIQUE,
       trigger_pattern TEXT NOT NULL,
       added_at TEXT NOT NULL,
-      container_config TEXT,
       requires_trigger INTEGER DEFAULT 1,
       model_provider TEXT DEFAULT 'opencode-zen',
       model_name TEXT DEFAULT 'kimi-k2.5'
@@ -567,7 +566,6 @@ export function getRegisteredGroup(
         folder: string;
         trigger_pattern: string;
         added_at: string;
-        container_config: string | null;
         requires_trigger: number | null;
         model_provider: string | null;
         model_name: string | null;
@@ -580,9 +578,6 @@ export function getRegisteredGroup(
     folder: row.folder,
     trigger: row.trigger_pattern,
     added_at: row.added_at,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     modelProvider: row.model_provider ?? undefined,
@@ -592,15 +587,14 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, model_provider, model_name)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, requires_trigger, model_provider, model_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
     group.folder,
     group.trigger,
     group.added_at,
-    group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
     group.modelProvider ?? 'opencode-zen',
     group.modelName ?? 'kimi-k2.5',
@@ -614,7 +608,6 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     folder: string;
     trigger_pattern: string;
     added_at: string;
-    container_config: string | null;
     requires_trigger: number | null;
     model_provider: string | null;
     model_name: string | null;
@@ -626,9 +619,6 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       folder: row.folder,
       trigger: row.trigger_pattern,
       added_at: row.added_at,
-      containerConfig: row.container_config
-        ? JSON.parse(row.container_config)
-        : undefined,
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       modelProvider: row.model_provider ?? undefined,

@@ -1,5 +1,7 @@
 # NanoClaw Security Model
 
+> Note: Agents now run in the host process. Container-specific sections are historical and may not reflect current behavior.
+
 ## Trust Model
 
 | Entity            | Trust Level | Rationale                        |

@@ -1,11 +1,5 @@
-/**
- * NanoClaw Agent Runner (Vercel AI SDK)
- * Runs inside a container, receives config via stdin, outputs result to stdout
- */
-
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import {
   streamText,
   stepCountIs,
@@ -16,12 +10,12 @@ import {
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
-import { createToolRegistry } from './tools/index.js';
-import {
-  getCompactionThreshold,
-  getDefaultModel,
-  getModelConfig,
-} from './model-config.js';
+import { GROUPS_DIR } from '../config.js';
+import { readEnvFile } from '../env.js';
+import { logger } from '../logger.js';
+import { RegisteredGroup } from '../types.js';
+import { createToolRegistry } from './tool-registry.js';
+import { getCompactionThreshold, getModelConfig } from './model-config.js';
 import {
   getOrCreateSessionId,
   getSessionTokenCount,
@@ -30,124 +24,76 @@ import {
   saveMessage,
 } from './session-store.js';
 
-interface ContainerInput {
+const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
+const DEFAULT_MODEL_NAME = 'kimi-k2.5';
+
+const activeCompactions = new Set<string>();
+
+export interface AgentInput {
   prompt: string;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
-  secrets?: Record<string, string>;
   modelProvider?: string;
   modelName?: string;
 }
 
-interface ContainerOutput {
+export interface AgentOutput {
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
   error?: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
-const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
-const IPC_POLL_MS = 500;
-
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
-
-const activeCompactions = new Set<string>();
-
-async function readStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on('end', () => resolve(data));
-    process.stdin.on('error', reject);
-  });
+export interface AvailableGroup {
+  jid: string;
+  name: string;
+  lastActivity: string;
+  isRegistered: boolean;
 }
 
-function writeOutput(output: ContainerOutput): void {
-  console.log(OUTPUT_START_MARKER);
-  console.log(JSON.stringify(output));
-  console.log(OUTPUT_END_MARKER);
+export interface AgentRuntimeDeps {
+  sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
+  registerGroup: (jid: string, group: RegisteredGroup) => void;
+  getRegisteredGroups: () => Record<string, RegisteredGroup>;
 }
 
-function log(message: string): void {
-  console.error(`[agent-runner] ${message}`);
+export interface AgentRuntime {
+  run: (
+    input: AgentInput,
+    onOutput?: (output: AgentOutput) => Promise<void>,
+  ) => Promise<AgentOutput>;
+  pipeMessage: (groupJid: string, text: string) => boolean;
+  close: (groupJid: string) => void;
 }
 
-function shouldClose(): boolean {
-  if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
-    try {
-      fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
-    } catch {
-      /* ignore */
-    }
-    return true;
-  }
-  return false;
+interface PipeState {
+  queue: string[];
+  waiters: Array<(message: string | null) => void>;
+  closed: boolean;
 }
 
-function drainIpcInput(): string[] {
-  try {
-    fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
-    const files = fs
-      .readdirSync(IPC_INPUT_DIR)
-      .filter((f) => f.endsWith('.json'))
-      .sort();
-
-    const messages: string[] = [];
-    for (const file of files) {
-      const filePath = path.join(IPC_INPUT_DIR, file);
-      try {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
-          messages.push(data.text);
-        }
-      } catch (err) {
-        log(
-          `Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        try {
-          fs.unlinkSync(filePath);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    return messages;
-  } catch (err) {
-    log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
-    return [];
-  }
+interface AgentSecrets {
+  CLAUDE_CODE_OAUTH_TOKEN?: string;
+  ANTHROPIC_API_KEY?: string;
+  ANTHROPIC_AUTH_TOKEN?: string;
+  OPENCODE_ZEN_API_KEY?: string;
 }
 
-function waitForIpcMessage(): Promise<string | null> {
-  return new Promise((resolve) => {
-    const poll = () => {
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
-        return;
-      }
-      setTimeout(poll, IPC_POLL_MS);
-    };
-    poll();
-  });
+function readSecrets(): AgentSecrets {
+  return readEnvFile([
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'OPENCODE_ZEN_API_KEY',
+  ]);
 }
 
-function buildSystemPrompt(isMain: boolean): string {
-  const groupClaude = '/workspace/group/CLAUDE.md';
-  const globalClaude = '/workspace/global/CLAUDE.md';
+function buildSystemPrompt(groupFolder: string, isMain: boolean): string {
+  const groupClaude = path.join(GROUPS_DIR, groupFolder, 'CLAUDE.md');
+  const globalClaude = path.join(GROUPS_DIR, 'global', 'CLAUDE.md');
   const parts: string[] = [];
 
   if (fs.existsSync(groupClaude)) {
@@ -164,7 +110,7 @@ function buildSystemPrompt(isMain: boolean): string {
 function createModel(
   configProvider: string,
   modelName: string,
-  secrets?: Record<string, string>,
+  secrets?: AgentSecrets,
 ) {
   if (configProvider === 'opencode-zen') {
     const apiKey =
@@ -179,7 +125,9 @@ function createModel(
   }
 
   if (configProvider !== 'anthropic') {
-    log(`Unknown provider ${configProvider}, falling back to anthropic`);
+    logger.warn(
+      `Unknown provider ${configProvider}, falling back to anthropic`,
+    );
   }
   const apiKey = secrets?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
   const authToken =
@@ -194,37 +142,42 @@ function createModel(
 async function runQuery(
   prompt: string,
   sessionId: string,
-  containerInput: ContainerInput,
-  mcpServerPath: string,
+  input: AgentInput,
+  secrets: AgentSecrets,
+  deps: AgentRuntimeDeps,
 ): Promise<{
   newSessionId: string;
   responseText: string;
   usageTokens: number;
 }> {
-  const config = getModelConfig(
-    containerInput.modelProvider,
-    containerInput.modelName,
-  );
-  const model = createModel(
-    config.provider,
-    config.modelName,
-    containerInput.secrets,
-  );
+  const config = getModelConfig(input.modelProvider, input.modelName);
+  const model = createModel(config.provider, config.modelName, secrets);
 
-  const systemPrompt = buildSystemPrompt(containerInput.isMain);
+  const systemPrompt = buildSystemPrompt(input.groupFolder, input.isMain);
   const messages: ModelMessage[] = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
-  messages.push(...loadMessages(containerInput.groupFolder, sessionId));
+  messages.push(...loadMessages(input.groupFolder, sessionId));
   messages.push({ role: 'user', content: prompt });
 
+  const groupDir = path.join(GROUPS_DIR, input.groupFolder);
   const tools = createToolRegistry({
-    mcpServerPath,
-    mcpEnv: {
-      NANOCLAW_CHAT_JID: containerInput.chatJid,
-      NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-      NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+    workspace: {
+      groupDir,
+      projectDir: process.cwd(),
+      globalDir: path.join(GROUPS_DIR, 'global'),
+      isMain: input.isMain,
+    },
+    nanoclawContext: {
+      chatJid: input.chatJid,
+      groupFolder: input.groupFolder,
+      isMain: input.isMain,
+    },
+    nanoclawDeps: {
+      sendMessage: deps.sendMessage,
+      registerGroup: deps.registerGroup,
+      getRegisteredGroups: deps.getRegisteredGroups,
     },
   }) as Record<string, any>;
 
@@ -235,10 +188,10 @@ async function runQuery(
   const result = streamText({
     model,
     messages,
-    tools: tools as Record<string, any>,
+    tools,
     maxOutputTokens: config.maxOutputTokens,
     stopWhen: stepCountIs(8),
-    onFinish: (event) => {
+    onFinish: (event: any) => {
       responseMessages = event.response?.messages ?? [];
       usageTokens = event.totalUsage?.totalTokens ?? 0;
     },
@@ -253,7 +206,7 @@ async function runQuery(
   }
 
   saveMessage(
-    containerInput.groupFolder,
+    input.groupFolder,
     sessionId,
     { role: 'user', content: prompt },
     null,
@@ -264,37 +217,37 @@ async function runQuery(
     const tokenCount =
       !tokenAssigned && message.role === 'assistant' ? usageTokens : null;
     if (tokenCount != null) tokenAssigned = true;
-    saveMessage(containerInput.groupFolder, sessionId, message, tokenCount);
+    saveMessage(input.groupFolder, sessionId, message, tokenCount);
   }
 
   return { newSessionId: sessionId, responseText, usageTokens };
 }
 
 async function maybeCompactSession(
-  containerInput: ContainerInput,
+  input: AgentInput,
   sessionId: string,
   usageTokens: number,
+  secrets: AgentSecrets,
 ): Promise<void> {
-  const config = getModelConfig(
-    containerInput.modelProvider,
-    containerInput.modelName,
-  );
+  const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
 
-  const currentTokens = getSessionTokenCount(sessionId) + (usageTokens || 0);
+  const currentTokens =
+    getSessionTokenCount(input.groupFolder, sessionId) + (usageTokens || 0);
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
-  await compactSession(containerInput, sessionId);
+  await compactSession(input, sessionId, secrets);
   activeCompactions.delete(sessionId);
 }
 
 async function compactSession(
-  containerInput: ContainerInput,
+  input: AgentInput,
   sessionId: string,
+  secrets: AgentSecrets,
 ): Promise<void> {
   try {
-    const messages = loadMessages(containerInput.groupFolder, sessionId);
+    const messages = loadMessages(input.groupFolder, sessionId);
     if (messages.length < 4) return;
 
     const userIndexes = messages
@@ -307,17 +260,10 @@ async function compactSession(
     const recent = messages.slice(splitIndex);
     if (older.length === 0) return;
 
-    archiveConversation(containerInput.groupFolder, sessionId, messages);
+    archiveConversation(input.groupFolder, sessionId, messages);
 
-    const config = getModelConfig(
-      containerInput.modelProvider,
-      containerInput.modelName,
-    );
-    const model = createModel(
-      config.provider,
-      config.modelName,
-      containerInput.secrets,
-    );
+    const config = getModelConfig(input.modelProvider, input.modelName);
+    const model = createModel(config.provider, config.modelName, secrets);
 
     const summaryPrompt = buildSummaryPrompt(older);
     let summaryText = '';
@@ -343,13 +289,13 @@ async function compactSession(
       content: `Summary of earlier conversation:\n${summaryText.trim()}`,
     };
 
-    replaceSessionMessages(containerInput.groupFolder, sessionId, [
+    replaceSessionMessages(input.groupFolder, sessionId, [
       summaryMessage,
       ...recent,
     ]);
-    log(`Session ${sessionId} compacted (${older.length} -> summary)`);
+    logger.debug(`Session ${sessionId} compacted (${older.length} -> summary)`);
   } catch (err) {
-    log(
+    logger.warn(
       `Compaction failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
@@ -379,7 +325,11 @@ function archiveConversation(
   messages: ModelMessage[],
 ): void {
   try {
-    const conversationsDir = '/workspace/group/conversations';
+    const conversationsDir = path.join(
+      GROUPS_DIR,
+      groupFolder,
+      'conversations',
+    );
     fs.mkdirSync(conversationsDir, { recursive: true });
 
     const date = new Date().toISOString().split('T')[0];
@@ -387,9 +337,9 @@ function archiveConversation(
     const filePath = path.join(conversationsDir, filename);
     const markdown = formatTranscriptMarkdown(messages);
     fs.writeFileSync(filePath, markdown);
-    log(`Archived conversation to ${filePath}`);
+    logger.debug(`Archived conversation to ${filePath}`);
   } catch (err) {
-    log(
+    logger.warn(
       `Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
@@ -471,11 +421,13 @@ function extractToolCalls(message: ModelMessage): Array<{
 }> {
   if (message.role !== 'assistant') return [];
   if (!Array.isArray(message.content)) return [];
-  return message.content.filter(isToolCallPart).map((part) => ({
-    toolName: part.toolName,
-    toolCallId: part.toolCallId,
-    input: part.input,
-  }));
+  return (message.content as ToolCallPart[])
+    .filter(isToolCallPart)
+    .map((part) => ({
+      toolName: part.toolName,
+      toolCallId: part.toolCallId,
+      input: part.input,
+    }));
 }
 
 function isTextPart(part: unknown): part is { text: string | undefined } {
@@ -502,97 +454,171 @@ function isToolResultPart(part: unknown): part is ToolResultPart {
   );
 }
 
-async function main(): Promise<void> {
-  let containerInput: ContainerInput;
-
-  try {
-    const stdinData = await readStdin();
-    containerInput = JSON.parse(stdinData);
-    try {
-      fs.unlinkSync('/tmp/input.json');
-    } catch {
-      /* ignore */
-    }
-    log(`Received input for group: ${containerInput.groupFolder}`);
-  } catch (err) {
-    writeOutput({
-      status: 'error',
-      result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
-    });
-    process.exit(1);
-  }
-
-  const defaults = getDefaultModel();
-  if (!containerInput.modelProvider)
-    containerInput.modelProvider = defaults.provider;
-  if (!containerInput.modelName) containerInput.modelName = defaults.modelName;
-
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
-
-  let sessionId =
-    containerInput.sessionId ||
-    getOrCreateSessionId(containerInput.groupFolder);
-  fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
-  try {
-    fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
-  } catch {
-    /* ignore */
-  }
-
-  let prompt = containerInput.prompt;
-  if (containerInput.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
-  }
-  const pending = drainIpcInput();
-  if (pending.length > 0) {
-    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
-  }
-
-  try {
-    while (true) {
-      log(`Starting query (session: ${sessionId})...`);
-      const { newSessionId, responseText, usageTokens } = await runQuery(
-        prompt,
-        sessionId,
-        containerInput,
-        mcpServerPath,
-      );
-      sessionId = newSessionId;
-
-      writeOutput({
-        status: 'success',
-        result: responseText || null,
-        newSessionId: sessionId,
-      });
-
-      void maybeCompactSession(containerInput, sessionId, usageTokens);
-
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
-
-      log('Query ended, waiting for next IPC message...');
-      const nextMessage = await waitForIpcMessage();
-      if (nextMessage === null) {
-        log('Close sentinel received, exiting');
-        break;
-      }
-
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
-    }
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    log(`Agent error: ${errorMessage}`);
-    writeOutput({
-      status: 'error',
-      result: null,
-      newSessionId: sessionId,
-      error: errorMessage,
-    });
-    process.exit(1);
-  }
+function buildPipeState(): PipeState {
+  return { queue: [], waiters: [], closed: false };
 }
 
-main();
+function drainPipe(pipe: PipeState): string[] {
+  if (pipe.queue.length === 0) return [];
+  const messages = pipe.queue.slice();
+  pipe.queue = [];
+  return messages;
+}
+
+function waitForPipeMessage(pipe: PipeState): Promise<string | null> {
+  if (pipe.closed) return Promise.resolve(null);
+  if (pipe.queue.length > 0) {
+    const next = pipe.queue.shift() || null;
+    return Promise.resolve(next);
+  }
+  return new Promise((resolve) => {
+    pipe.waiters.push(resolve);
+  });
+}
+
+function enqueuePipeMessage(pipe: PipeState, message: string): void {
+  if (pipe.closed) return;
+  if (pipe.waiters.length > 0) {
+    const resolve = pipe.waiters.shift();
+    resolve?.(message);
+    return;
+  }
+  pipe.queue.push(message);
+}
+
+function closePipe(pipe: PipeState): void {
+  pipe.closed = true;
+  while (pipe.waiters.length > 0) {
+    const resolve = pipe.waiters.shift();
+    resolve?.(null);
+  }
+  pipe.queue = [];
+}
+
+export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
+  const pipes = new Map<string, PipeState>();
+  const activeRuns = new Set<string>();
+
+  const getPipe = (groupJid: string): PipeState => {
+    let pipe = pipes.get(groupJid);
+    if (!pipe) {
+      pipe = buildPipeState();
+      pipes.set(groupJid, pipe);
+    }
+    return pipe;
+  };
+
+  const pipeMessage = (groupJid: string, text: string): boolean => {
+    if (!activeRuns.has(groupJid)) return false;
+    enqueuePipeMessage(getPipe(groupJid), text);
+    return true;
+  };
+
+  const close = (groupJid: string): void => {
+    closePipe(getPipe(groupJid));
+  };
+
+  const run = async (
+    input: AgentInput,
+    onOutput?: (output: AgentOutput) => Promise<void>,
+  ): Promise<AgentOutput> => {
+    const startTime = Date.now();
+    const secrets = readSecrets();
+
+    if (!input.modelProvider) input.modelProvider = DEFAULT_MODEL_PROVIDER;
+    if (!input.modelName) input.modelName = DEFAULT_MODEL_NAME;
+
+    const groupDir = path.join(GROUPS_DIR, input.groupFolder);
+    fs.mkdirSync(groupDir, { recursive: true });
+
+    const pipe = getPipe(input.chatJid);
+    pipe.closed = false;
+    activeRuns.add(input.chatJid);
+
+    let sessionId = input.sessionId || getOrCreateSessionId(input.groupFolder);
+    let prompt = input.prompt;
+    if (input.isScheduledTask) {
+      prompt =
+        '[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n' +
+        prompt;
+    }
+
+    const pending = drainPipe(pipe);
+    if (pending.length > 0) {
+      logger.debug(
+        { group: input.groupFolder, count: pending.length },
+        'Draining pending piped messages into initial prompt',
+      );
+      prompt += '\n' + pending.join('\n');
+    }
+
+    try {
+      while (true) {
+        logger.debug(
+          { group: input.groupFolder, sessionId },
+          'Starting agent query',
+        );
+        const { newSessionId, responseText, usageTokens } = await runQuery(
+          prompt,
+          sessionId,
+          input,
+          secrets,
+          deps,
+        );
+        sessionId = newSessionId;
+
+        const output: AgentOutput = {
+          status: 'success',
+          result: responseText || null,
+          newSessionId: sessionId,
+        };
+        if (onOutput) await onOutput(output);
+
+        void maybeCompactSession(input, sessionId, usageTokens, secrets);
+
+        if (onOutput) {
+          await onOutput({
+            status: 'success',
+            result: null,
+            newSessionId: sessionId,
+          });
+        }
+
+        const nextMessage = await waitForPipeMessage(pipe);
+        if (nextMessage === null) {
+          logger.debug(
+            { group: input.groupFolder, durationMs: Date.now() - startTime },
+            'Agent run closed',
+          );
+          break;
+        }
+        prompt = nextMessage;
+      }
+
+      return {
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+      };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { group: input.groupFolder, error: errorMessage },
+        'Agent error',
+      );
+      const output: AgentOutput = {
+        status: 'error',
+        result: null,
+        newSessionId: sessionId,
+        error: errorMessage,
+      };
+      if (onOutput) await onOutput(output);
+      return output;
+    } finally {
+      activeRuns.delete(input.chatJid);
+      closePipe(pipe);
+    }
+  };
+
+  return { run, pipeMessage, close };
+}

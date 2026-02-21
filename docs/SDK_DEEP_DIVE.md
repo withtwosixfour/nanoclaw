@@ -1,6 +1,8 @@
 # Claude Agent SDK Deep Dive
 
-Findings from reverse-engineering the OpenCode Zen Claude Agent SDK v0.2.29–0.2.34 to understand how `query()` works, why agent teams subagents were being killed, and how to fix it. Supplemented with official SDK reference docs.
+> Note: Agent execution now runs in-process. Container references below are historical.
+
+Findings from reverse-engineering `@anthropic-ai/claude-agent-sdk` v0.2.29–0.2.34 to understand how `query()` works, why agent teams subagents were being killed, and how to fix it. Supplemented with official SDK reference docs.
 
 ## Architecture
 
@@ -33,7 +35,7 @@ $X Query      <------   stdout writer
   (JSON-lines)             |
                         EZ() recursive generator
                            |
-                         OpenCode Zen Messages API
+                        Anthropic Messages API
 ```
 
 ## The Core Agent Loop (EZ)
@@ -49,7 +51,7 @@ Each invocation = one API call to Claude (one "turn").
 ### Flow per turn:
 
 1. **Prepare messages** — trim context, run compaction if needed
-2. **Call the OpenCode Zen API** (via `mW1` streaming function)
+2. **Call the Anthropic API** (via `mW1` streaming function)
 3. **Extract tool_use blocks** from the response
 4. **Branch:**
    - If **no tool_use blocks** → stop (run stop hooks, return)
@@ -245,7 +247,7 @@ type SDKAssistantMessage = {
   type: 'assistant';
   uuid: UUID;
   session_id: string;
-  message: APIAssistantMessage; // From OpenCode Zen SDK
+  message: APIAssistantMessage; // From Anthropic SDK
   parent_tool_use_id: string | null; // Non-null when from subagent
 };
 ```
@@ -659,7 +661,7 @@ function createSdkMcpServer(options: {
 | `GU1`    | Individual tool executor                               |
 | `lTq`    | SDK session runner (calls EZ directly)                 |
 | `bd1`    | stdin reader (JSON-lines from transport)               |
-| `mW1`    | OpenCode Zen API streaming caller                      |
+| `mW1`    | Anthropic API streaming caller                         |
 
 ## Key Files
 

@@ -15,11 +15,6 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src/**/*", "container/agent-runner/src/**/*"],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "container/agent-runner/node_modules",
-    "container/agent-runner/dist"
-  ]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
 }

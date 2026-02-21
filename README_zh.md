@@ -67,6 +67,7 @@ claude
 ```
 
 在主频道（你的self-chat）中，可以管理群组和任务：
+
 ```
 @Andy 列出所有群组的计划任务
 @Andy 暂停周一简报任务
@@ -99,14 +100,17 @@ claude
 我们希望看到的技能：
 
 **通信渠道**
+
 - `/add-telegram` - 添加 Telegram 作为渠道。应提供选项让用户选择替换 WhatsApp 或作为额外渠道添加。也应能将其添加为控制渠道（可以触发动作）或仅作为被其他地方触发的动作所使用的渠道。
 - `/add-slack` - 添加 Slack
 - `/add-discord` - 添加 Discord
 
 **平台支持**
+
 - `/setup-windows` - 通过 WSL2 + Docker 支持 Windows
 
 **会话管理**
+
 - `/add-clear` - 添加一个 `/clear` 命令，用于压缩会话（在同一会话中总结上下文，同时保留关键信息）。这需要研究如何通过 Claude Agent SDK 以编程方式触发压缩。
 
 ## 系统要求
@@ -119,18 +123,18 @@ claude
 ## 架构
 
 ```
-WhatsApp (baileys) --> SQLite --> 轮询循环 --> 容器 (Claude Agent SDK) --> 响应
+WhatsApp (baileys) --> SQLite --> 轮询循环 --> 主机智能体运行时 --> 响应
 ```
 
-单一 Node.js 进程。智能体在具有挂载目录的隔离 Linux 容器中执行。每个群组独立的消息队列，带全局并发控制。通过文件系统进行进程间通信（IPC）。
+单一 Node.js 进程。智能体直接在主机进程中执行，支持实时消息追加与每群组并发控制。
 
 关键文件：
+
 - `src/index.ts` - 编排器：状态管理、消息循环、智能体调用
 - `src/channels/whatsapp.ts` - WhatsApp 连接、认证、收发消息
-- `src/ipc.ts` - IPC 监听与任务处理
+- `src/agent-runner/runtime.ts` - 主机智能体运行时（流式、工具、实时消息追加）
 - `src/router.ts` - 消息格式化与出站路由
 - `src/group-queue.ts` - 每群组队列，带全局并发限制
-- `src/container-runner.ts` - 生成流式智能体容器
 - `src/task-scheduler.ts` - 运行计划任务
 - `src/db.ts` - SQLite 操作（消息、群组、会话、状态）
 - `groups/*/CLAUDE.md` - 各群组的记忆
@@ -141,17 +145,13 @@ WhatsApp (baileys) --> SQLite --> 轮询循环 --> 容器 (Claude Agent SDK) -->
 
 因为我用 WhatsApp。fork 这个项目然后运行一个技能来改变它。正是这个项目的核心理念。
 
-**为什么是 Docker？**
-
-Docker 提供跨平台支持（macOS 和 Linux）和成熟的生态系统。在 macOS 上，你可以选择通过 `/convert-to-apple-container` 切换到 Apple Container 以获得更轻量的原生运行时。
-
 **我可以在 Linux 上运行吗？**
 
-可以。Docker 是默认的容器运行时，在 macOS 和 Linux 上都可以使用。只需运行 `/setup`。
+可以。它直接运行在主机 Node.js 进程中（macOS 或 Linux）。
 
 **这个安全吗？**
 
-智能体在容器中运行，而不是在应用级别的权限检查之后。它们只能访问被明确挂载的目录。你仍然应该审查你运行的代码，但这个代码库小到你真的可以做到。完整的安全模型请见 [docs/SECURITY.md](docs/SECURITY.md)。
+智能体运行在主机进程内，没有容器隔离。请将它视为能访问你的代码仓库与主机账户。完整安全模型请见 [docs/SECURITY.md](docs/SECURITY.md)。
 
 **为什么没有配置文件？**
 

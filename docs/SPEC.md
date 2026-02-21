@@ -1,5 +1,7 @@
 # NanoClaw Specification
 
+> Note: Container execution was removed. Sections referencing containers are historical.
+
 A personal Claude assistant accessible via WhatsApp, with persistent memory per conversation, scheduled tasks, and email integration.
 
 ---
@@ -71,14 +73,14 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 
 ### Technology Stack
 
-| Component           | Technology                        | Purpose                                    |
-| ------------------- | --------------------------------- | ------------------------------------------ |
-| WhatsApp Connection | Node.js (@whiskeysockets/baileys) | Connect to WhatsApp, send/receive messages |
-| Message Storage     | SQLite (better-sqlite3)           | Store messages for polling                 |
-| Container Runtime   | Containers (Linux VMs)            | Isolated environments for agent execution  |
-| Agent               | Claude Agent SDK (0.2.29)         | Run Claude with tools and MCP servers      |
-| Browser Automation  | agent-browser + Chromium          | Web interaction and screenshots            |
-| Runtime             | Node.js 20+                       | Host process for routing and scheduling    |
+| Component           | Technology                              | Purpose                                    |
+| ------------------- | --------------------------------------- | ------------------------------------------ |
+| WhatsApp Connection | Node.js (@whiskeysockets/baileys)       | Connect to WhatsApp, send/receive messages |
+| Message Storage     | SQLite (better-sqlite3)                 | Store messages for polling                 |
+| Container Runtime   | Containers (Linux VMs)                  | Isolated environments for agent execution  |
+| Agent               | @anthropic-ai/claude-agent-sdk (0.2.29) | Run Claude with tools and MCP servers      |
+| Browser Automation  | agent-browser + Chromium                | Web interaction and screenshots            |
+| Runtime             | Node.js 20+                             | Host process for routing and scheduling    |
 
 ---
 
@@ -99,31 +101,17 @@ nanoclaw/
 │
 ├── src/
 │   ├── index.ts                   # Orchestrator: state, message loop, agent invocation
+│   ├── agent-runner/              # Host agent runtime (tools, sessions, compaction)
 │   ├── channels/
 │   │   └── whatsapp.ts            # WhatsApp connection, auth, send/receive
-│   ├── ipc.ts                     # IPC watcher and task processing
 │   ├── router.ts                  # Message formatting and outbound routing
 │   ├── config.ts                  # Configuration constants
 │   ├── types.ts                   # TypeScript interfaces (includes Channel)
 │   ├── logger.ts                  # Pino logger setup
 │   ├── db.ts                      # SQLite database initialization and queries
 │   ├── group-queue.ts             # Per-group queue with global concurrency limit
-│   ├── mount-security.ts          # Mount allowlist validation for containers
 │   ├── whatsapp-auth.ts           # Standalone WhatsApp authentication
-│   ├── task-scheduler.ts          # Runs scheduled tasks when due
-│   └── container-runner.ts        # Spawns agents in containers
-│
-├── container/
-│   ├── Dockerfile                 # Container image (runs as 'node' user, includes Claude Code CLI)
-│   ├── build.sh                   # Build script for container image
-│   ├── agent-runner/              # Code that runs inside the container
-│   │   ├── package.json
-│   │   ├── tsconfig.json
-│   │   └── src/
-│   │       ├── index.ts           # Entry point (query loop, IPC polling, session resume)
-│   │       └── ipc-mcp-stdio.ts   # Stdio-based MCP server for host communication
-│   └── skills/
-│       └── agent-browser.md       # Browser automation skill
+│   └── task-scheduler.ts          # Runs scheduled tasks when due
 │
 ├── dist/                          # Compiled JavaScript (gitignored)
 │
@@ -131,7 +119,7 @@ nanoclaw/
 │   └── skills/
 │       ├── setup/SKILL.md              # /setup - First-time installation
 │       ├── customize/SKILL.md          # /customize - Add capabilities
-│       ├── debug/SKILL.md              # /debug - Container debugging
+│       ├── debug/SKILL.md              # /debug - Runtime debugging
 │       ├── add-telegram/SKILL.md       # /add-telegram - Telegram channel
 │       ├── add-gmail/SKILL.md          # /add-gmail - Gmail integration
 │       ├── add-voice-transcription/    # /add-voice-transcription - Whisper
@@ -247,10 +235,10 @@ The token can be extracted from `~/.claude/.credentials.json` if you're logged i
 **Option 2: Pay-per-use API Key**
 
 ```bash
-OPENCODE_ZEN_API_KEY=sk-zen-...
+ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
-Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `OPENCODE_ZEN_API_KEY`) are extracted from `.env` and written to `data/env/env`, then mounted into the container at `/workspace/env-dir/env` and sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because some container runtimes lose `-e` environment variables when using `-i` (interactive mode with piped stdin).
+Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`) are extracted from `.env` and written to `data/env/env`, then mounted into the container at `/workspace/env-dir/env` and sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because some container runtimes lose `-e` environment variables when using `-i` (interactive mode with piped stdin).
 
 ### Changing the Assistant Name
 
