@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { streamText, type CoreMessage } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
 import { createToolRegistry } from './tools/index.js';
 import {
@@ -159,6 +160,18 @@ function createModel(
   modelName: string,
   secrets?: Record<string, string>,
 ) {
+  if (configProvider === 'opencode-zen') {
+    const apiKey =
+      secrets?.OPENCODE_ZEN_API_KEY || process.env.OPENCODE_ZEN_API_KEY;
+    const provider = createOpenAICompatible({
+      name: 'opencode-zen',
+      baseURL: 'https://opencode.ai/zen/v1',
+      ...(apiKey ? { apiKey } : {}),
+      includeUsage: true,
+    });
+    return provider(modelName);
+  }
+
   if (configProvider !== 'anthropic') {
     log(`Unknown provider ${configProvider}, falling back to anthropic`);
   }
@@ -269,7 +282,7 @@ async function maybeCompactSession(
 
   const currentTokens = getSessionTokenCount(sessionId) + (usageTokens || 0);
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
-  
+
   activeCompactions.add(sessionId);
   await compactSession(containerInput, sessionId);
   activeCompactions.delete(sessionId);

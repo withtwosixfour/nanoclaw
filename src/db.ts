@@ -79,8 +79,8 @@ function createSchema(database: Database.Database): void {
       added_at TEXT NOT NULL,
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1,
-      model_provider TEXT DEFAULT 'anthropic',
-      model_name TEXT DEFAULT 'claude-3-5-sonnet-20241022'
+      model_provider TEXT DEFAULT 'opencode-zen',
+      model_name TEXT DEFAULT 'kimi-k2.5'
     );
     CREATE TABLE IF NOT EXISTS conversation_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,17 +122,29 @@ function createSchema(database: Database.Database): void {
   // Add model_provider and model_name columns to registered_groups if missing
   try {
     database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN model_provider TEXT DEFAULT 'anthropic'`,
+      `ALTER TABLE registered_groups ADD COLUMN model_provider TEXT DEFAULT 'opencode-zen'`,
     );
   } catch {
     /* column already exists */
   }
   try {
     database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN model_name TEXT DEFAULT 'claude-3-5-sonnet-20241022'`,
+      `ALTER TABLE registered_groups ADD COLUMN model_name TEXT DEFAULT 'kimi-k2.5'`,
     );
   } catch {
     /* column already exists */
+  }
+
+  // Migrate existing defaults to OpenCode Zen Kimi K2.5
+  try {
+    database.exec(`
+      UPDATE registered_groups
+      SET model_provider = 'opencode-zen', model_name = 'kimi-k2.5'
+      WHERE (model_provider IS NULL OR model_provider = 'anthropic')
+        AND (model_name IS NULL OR model_name = 'claude-3-5-sonnet-20241022')
+    `);
+  } catch {
+    /* best-effort migration */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)

@@ -7,15 +7,15 @@ export interface ModelConfig {
 }
 
 const DEFAULT_MODEL_CONFIG: ModelConfig = {
-  provider: 'anthropic',
-  modelName: 'claude-3-5-sonnet-20241022',
+  provider: 'opencode-zen',
+  modelName: 'kimi-k2.5',
   contextWindow: 200000,
   maxOutputTokens: 8192,
   compactionThresholdPercent: 60,
 };
 
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
-  'anthropic:claude-3-5-sonnet-20241022': {
+  'opencode-zen:kimi-k2.5': {
     ...DEFAULT_MODEL_CONFIG,
   },
 };

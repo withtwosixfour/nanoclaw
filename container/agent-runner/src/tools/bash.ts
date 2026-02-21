@@ -9,6 +9,7 @@ const SECRET_ENV_VARS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'OPENCODE_ZEN_API_KEY',
 ];
 
 function buildSanitizedEnv(): NodeJS.ProcessEnv {
