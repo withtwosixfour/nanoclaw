@@ -111,7 +111,6 @@ export function getSessionTokenCount(sessionId: string): number {
     .get(sessionId) as { total: number | null } | undefined;
   return row?.total ?? 0;
 }
-}
 
 export function replaceSessionMessages(
   groupFolder: string,
