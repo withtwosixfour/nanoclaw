@@ -39,6 +39,8 @@ export interface RegisteredGroup {
   added_at: string;
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
+  modelProvider?: string;
+  modelName?: string;
 }
 
 export interface NewMessage {
