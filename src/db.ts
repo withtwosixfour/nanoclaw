@@ -602,8 +602,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
-    group.modelProvider ?? 'anthropic',
-    group.modelName ?? 'claude-3-5-sonnet-20241022',
+    group.modelProvider ?? 'opencode-zen',
+    group.modelName ?? 'kimi-k2.5',
   );
 }
 

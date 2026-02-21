@@ -29,8 +29,8 @@ import { RegisteredGroup } from './types.js';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-const DEFAULT_MODEL_PROVIDER = 'anthropic';
-const DEFAULT_MODEL_NAME = 'claude-3-5-sonnet-20241022';
+const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
+const DEFAULT_MODEL_NAME = 'kimi-k2.5';
 
 function getHomeDir(): string {
   const home = process.env.HOME || os.homedir();
