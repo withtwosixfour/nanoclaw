@@ -104,14 +104,13 @@ export function getSessionTokenCount(sessionId: string): number {
   const database = getDb();
   const row = database
     .prepare(
-      `SELECT token_count
+      `SELECT SUM(token_count) as total
        FROM conversation_history
-       WHERE session_id = ? AND token_count IS NOT NULL
-       ORDER BY id DESC
-       LIMIT 1`,
+       WHERE session_id = ? AND token_count IS NOT NULL`,
     )
-    .get(sessionId) as { token_count: number } | undefined;
-  return row?.token_count ?? 0;
+    .get(sessionId) as { total: number | null } | undefined;
+  return row?.total ?? 0;
+}
 }
 
 export function replaceSessionMessages(
