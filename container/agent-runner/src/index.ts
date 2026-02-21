@@ -267,8 +267,7 @@ async function maybeCompactSession(
   );
   const threshold = getCompactionThreshold(config);
 
-  const currentTokens = usageTokens || getSessionTokenCount(sessionId);
-  if (currentTokens < threshold) return;
+  const currentTokens = getSessionTokenCount(sessionId) + (usageTokens || 0);
   if (activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
