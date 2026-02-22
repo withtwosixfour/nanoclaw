@@ -42,7 +42,7 @@ export class DiscordChannel implements Channel {
     message: Message,
   ): Promise<void> {
     try {
-      await message.react('👍');
+      await message.react('👀');
 
       // Set a safety timeout to auto-remove reaction after 5 minutes
       const timeout = setTimeout(
@@ -72,9 +72,9 @@ export class DiscordChannel implements Channel {
       const textChannel = channel as TextChannel;
       const message = await textChannel.messages.fetch(entry.messageId);
       if (message) {
-        // Remove the bot's own reaction (👍)
+        // Remove the bot's own reaction (👀)
         await message.reactions.cache
-          .get('👍')
+          .get('👀')
           ?.users.remove(this.client?.user?.id || '');
       }
     } catch (err) {
