@@ -382,9 +382,11 @@ This allows the agent to understand the conversation context even if it wasn't m
 
 ### Commands Available in Any Group
 
-| Command                | Example                     | Effect         |
-| ---------------------- | --------------------------- | -------------- |
-| `@Assistant [message]` | `@Andy what's the weather?` | Talk to Claude |
+| Command                | Example                     | Effect                    |
+| ---------------------- | --------------------------- | ------------------------- |
+| `@Assistant [message]` | `@Andy what's the weather?` | Talk to Claude            |
+| `/status`              | `/status`                   | Show session status       |
+| `/clear`               | `/clear`                    | Reset the group's session |
 
 ### Commands Available in Main Channel Only
 

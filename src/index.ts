@@ -23,6 +23,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
+  deleteSession,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -38,6 +39,13 @@ import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import {
+  clearSession,
+  getOrCreateSessionId,
+  getSessionLastTimestamp,
+  getSessionMessageCount,
+  getSessionTokenCount,
+} from './agent-runner/session-store.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -46,6 +54,7 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let lastCommandTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel;
@@ -75,6 +84,13 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+  const commandTs = getRouterState('last_command_timestamp');
+  try {
+    lastCommandTimestamp = commandTs ? JSON.parse(commandTs) : {};
+  } catch {
+    logger.warn('Corrupted last_command_timestamp in DB, resetting');
+    lastCommandTimestamp = {};
+  }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   logger.info(
@@ -86,6 +102,95 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+  setRouterState(
+    'last_command_timestamp',
+    JSON.stringify(lastCommandTimestamp),
+  );
+}
+
+type CommandType = 'clear' | 'status';
+
+function parseCommand(text: string): CommandType | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('/')) return null;
+  const normalized = trimmed.toLowerCase();
+  if (normalized === '/clear') return 'clear';
+  if (normalized === '/status') return 'status';
+  return null;
+}
+
+function splitCommandMessages(
+  messages: NewMessage[],
+  chatJid: string,
+): {
+  commands: Array<{ message: NewMessage; command: CommandType }>;
+  nonCommands: NewMessage[];
+} {
+  const commands: Array<{ message: NewMessage; command: CommandType }> = [];
+  const nonCommands: NewMessage[] = [];
+  const cutoff = lastCommandTimestamp[chatJid] || '';
+
+  for (const message of messages) {
+    const command = parseCommand(message.content);
+    if (command) {
+      if (!cutoff || message.timestamp > cutoff) {
+        commands.push({ message, command });
+      }
+      continue;
+    }
+    nonCommands.push(message);
+  }
+
+  return { commands, nonCommands };
+}
+
+async function handleCommandMessages(
+  chatJid: string,
+  group: RegisteredGroup,
+  channel: Channel,
+  commands: Array<{ message: NewMessage; command: CommandType }>,
+): Promise<void> {
+  if (commands.length === 0) return;
+
+  for (const { message, command } of commands) {
+    if (command === 'clear') {
+      clearSession(group.folder);
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+      await channel.sendMessage(
+        chatJid,
+        'Session cleared. New conversation will start on next message.',
+      );
+    } else if (command === 'status') {
+      const sessionId = sessions[group.folder];
+      if (!sessionId) {
+        await channel.sendMessage(
+          chatJid,
+          `Status: group=${group.folder} session=none (no active session)`,
+        );
+        return;
+      }
+      const modelProvider = group.modelProvider || 'opencode-zen';
+      const modelName = group.modelName || 'kimi-k2.5';
+      const messageCount = getSessionMessageCount(group.folder, sessionId);
+      const tokenCount = getSessionTokenCount(group.folder, sessionId);
+      const lastTimestamp =
+        getSessionLastTimestamp(group.folder, sessionId) || 'none';
+      await channel.sendMessage(
+        chatJid,
+        `Status: group=${group.folder} session=${sessionId} model=${modelProvider}/${modelName} messages=${messageCount} tokens=${tokenCount} last=${lastTimestamp}`,
+      );
+    }
+
+    if (
+      !lastCommandTimestamp[chatJid] ||
+      message.timestamp > lastCommandTimestamp[chatJid]
+    ) {
+      lastCommandTimestamp[chatJid] = message.timestamp;
+    }
+  }
+
+  saveState();
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -152,21 +257,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  const { commands, nonCommands } = splitCommandMessages(
+    missedMessages,
+    chatJid,
+  );
+  await handleCommandMessages(chatJid, group, channel, commands);
+  if (nonCommands.length === 0) return true;
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const hasTrigger = missedMessages.some((m) =>
+    const hasTrigger = nonCommands.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
+  const prompt = formatMessages(nonCommands);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  lastAgentTimestamp[chatJid] = nonCommands[nonCommands.length - 1].timestamp;
   saveState();
 
   logger.info(
@@ -348,6 +459,13 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
+          const { commands, nonCommands } = splitCommandMessages(
+            groupMessages,
+            chatJid,
+          );
+          await handleCommandMessages(chatJid, group, channel, commands);
+          if (nonCommands.length === 0) continue;
+
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
@@ -355,7 +473,7 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const hasTrigger = groupMessages.some((m) =>
+            const hasTrigger = nonCommands.some((m) =>
               TRIGGER_PATTERN.test(m.content.trim()),
             );
             if (!hasTrigger) continue;
@@ -368,8 +486,17 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] || '',
             ASSISTANT_NAME,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          const pendingMessages =
+            allPending.length > 0 ? allPending : nonCommands;
+          const pendingSplit = splitCommandMessages(pendingMessages, chatJid);
+          await handleCommandMessages(
+            chatJid,
+            group,
+            channel,
+            pendingSplit.commands,
+          );
+          const messagesToSend = pendingSplit.nonCommands;
+          if (messagesToSend.length === 0) continue;
           const formatted = formatMessages(messagesToSend);
 
           if (queue.sendMessage(chatJid, formatted)) {
