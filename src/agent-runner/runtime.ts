@@ -10,10 +10,10 @@ import {
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
-import { GROUPS_DIR } from '../config.js';
+import { AGENTS_DIR, SESSIONS_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
-import { RegisteredGroup } from '../types.js';
+import { Agent } from '../types.js';
 import { createToolRegistry } from './tool-registry.js';
 import { getCompactionThreshold, getModelConfig } from './model-config.js';
 import {
@@ -32,7 +32,7 @@ const activeCompactions = new Set<string>();
 export interface AgentInput {
   prompt: string;
   sessionId?: string;
-  groupFolder: string;
+  agentId: string; // Changed from groupFolder
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
@@ -56,8 +56,8 @@ export interface AvailableGroup {
 
 export interface AgentRuntimeDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
-  registerGroup: (jid: string, group: RegisteredGroup) => void;
-  getRegisteredGroups: () => Record<string, RegisteredGroup>;
+  registerAgent: (jid: string, agent: Agent) => void;
+  getRegisteredAgents: () => Record<string, Agent>;
 }
 
 export interface AgentRuntime {
@@ -91,13 +91,13 @@ function readSecrets(): AgentSecrets {
   ]);
 }
 
-function buildSystemPrompt(groupFolder: string, isMain: boolean): string {
-  const groupClaude = path.join(GROUPS_DIR, groupFolder, 'CLAUDE.md');
-  const globalClaude = path.join(GROUPS_DIR, 'global', 'CLAUDE.md');
+function buildSystemPrompt(agentId: string, isMain: boolean): string {
+  const agentClaude = path.join(AGENTS_DIR, agentId, 'CLAUDE.md');
+  const globalClaude = path.join(AGENTS_DIR, 'global', 'CLAUDE.md');
   const parts: string[] = [];
 
-  if (fs.existsSync(groupClaude)) {
-    parts.push(fs.readFileSync(groupClaude, 'utf-8').trim());
+  if (fs.existsSync(agentClaude)) {
+    parts.push(fs.readFileSync(agentClaude, 'utf-8').trim());
   }
 
   if (!isMain && fs.existsSync(globalClaude)) {
@@ -153,31 +153,31 @@ async function runQuery(
   const config = getModelConfig(input.modelProvider, input.modelName);
   const model = createModel(config.provider, config.modelName, secrets);
 
-  const systemPrompt = buildSystemPrompt(input.groupFolder, input.isMain);
+  const systemPrompt = buildSystemPrompt(input.agentId, input.isMain);
   const messages: ModelMessage[] = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
-  messages.push(...loadMessages(input.groupFolder, sessionId));
+  messages.push(...loadMessages(input.chatJid, sessionId));
   messages.push({ role: 'user', content: prompt });
 
-  const groupDir = path.join(GROUPS_DIR, input.groupFolder);
+  const agentDir = path.join(AGENTS_DIR, input.agentId);
   const tools = createToolRegistry({
     workspace: {
-      groupDir,
+      agentDir,
       projectDir: process.cwd(),
-      globalDir: path.join(GROUPS_DIR, 'global'),
+      globalDir: path.join(AGENTS_DIR, 'global'),
       isMain: input.isMain,
     },
     nanoclawContext: {
       chatJid: input.chatJid,
-      groupFolder: input.groupFolder,
+      agentId: input.agentId,
       isMain: input.isMain,
     },
     nanoclawDeps: {
       sendMessage: deps.sendMessage,
-      registerGroup: deps.registerGroup,
-      getRegisteredGroups: deps.getRegisteredGroups,
+      registerAgent: deps.registerAgent,
+      getRegisteredAgents: deps.getRegisteredAgents,
     },
   }) as Record<string, any>;
 
@@ -206,7 +206,7 @@ async function runQuery(
   }
 
   saveMessage(
-    input.groupFolder,
+    input.chatJid,
     sessionId,
     { role: 'user', content: prompt },
     null,
@@ -217,7 +217,7 @@ async function runQuery(
     const tokenCount =
       !tokenAssigned && message.role === 'assistant' ? usageTokens : null;
     if (tokenCount != null) tokenAssigned = true;
-    saveMessage(input.groupFolder, sessionId, message, tokenCount);
+    saveMessage(input.chatJid, sessionId, message, tokenCount);
   }
 
   return { newSessionId: sessionId, responseText, usageTokens };
@@ -233,7 +233,7 @@ async function maybeCompactSession(
   const threshold = getCompactionThreshold(config);
 
   const currentTokens =
-    getSessionTokenCount(input.groupFolder, sessionId) + (usageTokens || 0);
+    getSessionTokenCount(input.chatJid, sessionId) + (usageTokens || 0);
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
@@ -251,7 +251,7 @@ async function maybeCompactSessionPreflight(
   const threshold = getCompactionThreshold(config);
   if (activeCompactions.has(sessionId)) return;
 
-  const messages = loadMessages(input.groupFolder, sessionId);
+  const messages = loadMessages(input.chatJid, sessionId);
   if (messages.length < 4) return;
 
   const estimatedTokens =
@@ -269,7 +269,7 @@ async function compactSession(
   secrets: AgentSecrets,
 ): Promise<void> {
   try {
-    const messages = loadMessages(input.groupFolder, sessionId);
+    const messages = loadMessages(input.chatJid, sessionId);
     if (messages.length < 4) return;
 
     const userIndexes = messages
@@ -282,7 +282,7 @@ async function compactSession(
     const recent = messages.slice(splitIndex);
     if (older.length === 0) return;
 
-    archiveConversation(input.groupFolder, sessionId, messages);
+    archiveConversation(input.chatJid, sessionId, messages);
 
     const config = getModelConfig(input.modelProvider, input.modelName);
     const model = createModel(config.provider, config.modelName, secrets);
@@ -311,7 +311,7 @@ async function compactSession(
       content: `Summary of earlier conversation:\n${summaryText.trim()}`,
     };
 
-    replaceSessionMessages(input.groupFolder, sessionId, [
+    replaceSessionMessages(input.chatJid, sessionId, [
       summaryMessage,
       ...recent,
     ]);
@@ -355,14 +355,15 @@ function estimateTokenCount(messages: ModelMessage[]): number {
 }
 
 function archiveConversation(
-  groupFolder: string,
+  jid: string,
   sessionId: string,
   messages: ModelMessage[],
 ): void {
   try {
+    // Store archives in the session folder
     const conversationsDir = path.join(
-      GROUPS_DIR,
-      groupFolder,
+      SESSIONS_DIR,
+      jid.replace(/[:@]/g, '_'),
       'conversations',
     );
     fs.mkdirSync(conversationsDir, { recursive: true });
@@ -563,14 +564,15 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     if (!input.modelProvider) input.modelProvider = DEFAULT_MODEL_PROVIDER;
     if (!input.modelName) input.modelName = DEFAULT_MODEL_NAME;
 
-    const groupDir = path.join(GROUPS_DIR, input.groupFolder);
-    fs.mkdirSync(groupDir, { recursive: true });
+    const agentDir = path.join(AGENTS_DIR, input.agentId);
+    fs.mkdirSync(agentDir, { recursive: true });
 
     const pipe = getPipe(input.chatJid);
     pipe.closed = false;
     activeRuns.add(input.chatJid);
 
-    let sessionId = input.sessionId || getOrCreateSessionId(input.groupFolder);
+    let sessionId =
+      input.sessionId || getOrCreateSessionId(input.chatJid, input.agentId);
     let prompt = input.prompt;
     if (input.isScheduledTask) {
       prompt =
@@ -581,7 +583,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     const pending = drainPipe(pipe);
     if (pending.length > 0) {
       logger.debug(
-        { group: input.groupFolder, count: pending.length },
+        { agent: input.agentId, count: pending.length },
         'Draining pending piped messages into initial prompt',
       );
       prompt += '\n' + pending.join('\n');
@@ -590,7 +592,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     try {
       while (true) {
         logger.debug(
-          { group: input.groupFolder, sessionId },
+          { agent: input.agentId, sessionId },
           'Starting agent query',
         );
         await maybeCompactSessionPreflight(input, sessionId, prompt, secrets);
@@ -623,7 +625,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         const nextMessage = await waitForPipeMessage(pipe);
         if (nextMessage === null) {
           logger.debug(
-            { group: input.groupFolder, durationMs: Date.now() - startTime },
+            { agent: input.agentId, durationMs: Date.now() - startTime },
             'Agent run closed',
           );
           break;
@@ -639,7 +641,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       logger.error(
-        { group: input.groupFolder, error: errorMessage },
+        { agent: input.agentId, error: errorMessage },
         'Agent error',
       );
       const output: AgentOutput = {

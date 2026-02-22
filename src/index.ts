@@ -7,7 +7,7 @@ import {
   DISCORD_BOT_TOKEN,
   DISCORD_ONLY,
   IDLE_TIMEOUT,
-  MAIN_GROUP_FOLDER,
+  MAIN_AGENT_ID,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -21,23 +21,30 @@ import {
 } from './agent-runner/runtime.js';
 import {
   getAllChats,
-  getAllRegisteredGroups,
+  getAllAgents,
   getAllSessions,
   deleteSession,
   getMessagesSince,
   getNewMessages,
   getRouterState,
   initDatabase,
-  setRegisteredGroup,
+  setAgent,
   setRouterState,
   setSession,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatOutbound,
+  resolveAgentId,
+  ROUTES,
+  addRoute,
+} from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { Agent, Channel, NewMessage } from './types.js';
 import { logger } from './logger.js';
 import {
   clearSession,
@@ -46,13 +53,16 @@ import {
   getSessionMessageCount,
   getSessionTokenCount,
 } from './agent-runner/session-store.js';
+import { runMigration } from './migration.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
+// Sessions now map JID -> sessionId
 let sessions: Record<string, string> = {};
-let registeredGroups: Record<string, RegisteredGroup> = {};
+// Agents map agentId -> Agent definition
+let agents: Record<string, Agent> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let lastCommandTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -68,8 +78,8 @@ const agentRuntime = createAgentRuntime({
     }
     await channel.sendMessage(jid, text);
   },
-  registerGroup,
-  getRegisteredGroups: () => registeredGroups,
+  registerAgent,
+  getRegisteredAgents: () => agents,
 });
 
 queue.setPipeMessageFn(agentRuntime.pipeMessage);
@@ -91,10 +101,22 @@ function loadState(): void {
     logger.warn('Corrupted last_command_timestamp in DB, resetting');
     lastCommandTimestamp = {};
   }
-  sessions = getAllSessions();
-  registeredGroups = getAllRegisteredGroups();
+
+  // Load agents
+  agents = getAllAgents();
+
+  // Load sessions (new format: JID -> {agentId, sessionId})
+  const sessionData = getAllSessions();
+  sessions = {};
+  for (const [jid, data] of Object.entries(sessionData)) {
+    sessions[jid] = data.sessionId;
+  }
+
   logger.info(
-    { groupCount: Object.keys(registeredGroups).length },
+    {
+      agentCount: Object.keys(agents).length,
+      sessionCount: Object.keys(sessions).length,
+    },
     'State loaded',
   );
 }
@@ -146,7 +168,7 @@ function splitCommandMessages(
 
 async function handleCommandMessages(
   chatJid: string,
-  group: RegisteredGroup,
+  agent: Agent,
   channel: Channel,
   commands: Array<{ message: NewMessage; command: CommandType }>,
 ): Promise<void> {
@@ -154,31 +176,30 @@ async function handleCommandMessages(
 
   for (const { message, command } of commands) {
     if (command === 'clear') {
-      clearSession(group.folder);
-      delete sessions[group.folder];
-      deleteSession(group.folder);
+      clearSession(chatJid);
+      delete sessions[chatJid];
+      deleteSession(chatJid);
       await channel.sendMessage(
         chatJid,
         'Session cleared. New conversation will start on next message.',
       );
     } else if (command === 'status') {
-      const sessionId = sessions[group.folder];
+      const sessionId = sessions[chatJid];
       if (!sessionId) {
         await channel.sendMessage(
           chatJid,
-          `Status: group=${group.folder} session=none (no active session)`,
+          `Status: agent=${agent.id} session=none (no active session)`,
         );
         return;
       }
-      const modelProvider = group.modelProvider || 'opencode-zen';
-      const modelName = group.modelName || 'kimi-k2.5';
-      const messageCount = getSessionMessageCount(group.folder, sessionId);
-      const tokenCount = getSessionTokenCount(group.folder, sessionId);
-      const lastTimestamp =
-        getSessionLastTimestamp(group.folder, sessionId) || 'none';
+      const modelProvider = agent.modelProvider || 'opencode-zen';
+      const modelName = agent.modelName || 'kimi-k2.5';
+      const messageCount = getSessionMessageCount(chatJid, sessionId);
+      const tokenCount = getSessionTokenCount(chatJid, sessionId);
+      const lastTs = getSessionLastTimestamp(chatJid, sessionId) || 'none';
       await channel.sendMessage(
         chatJid,
-        `Status: group=${group.folder} session=${sessionId} model=${modelProvider}/${modelName} messages=${messageCount} tokens=${tokenCount} last=${lastTimestamp}`,
+        `Status: agent=${agent.id} session=${sessionId} model=${modelProvider}/${modelName} messages=${messageCount} tokens=${tokenCount} last=${lastTs}`,
       );
     }
 
@@ -193,17 +214,17 @@ async function handleCommandMessages(
   saveState();
 }
 
-function registerGroup(jid: string, group: RegisteredGroup): void {
-  registeredGroups[jid] = group;
-  setRegisteredGroup(jid, group);
+function registerAgent(id: string, agent: Agent): void {
+  agents[id] = agent;
+  setAgent(id, agent);
 
-  // Create group folder
-  const groupDir = path.join(DATA_DIR, '..', 'groups', group.folder);
-  fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+  // Create agent folder if needed
+  const agentDir = path.join(DATA_DIR, '..', 'agents', agent.folder);
+  fs.mkdirSync(path.join(agentDir, 'logs'), { recursive: true });
 
   logger.info(
-    { jid, name: group.name, folder: group.folder },
-    'Group registered',
+    { id, name: agent.name, folder: agent.folder },
+    'Agent registered',
   );
 }
 
@@ -213,7 +234,8 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
  */
 export function getAvailableGroups(): AvailableGroup[] {
   const chats = getAllChats();
-  const registeredJids = new Set(Object.keys(registeredGroups));
+  // A JID is "registered" if it has a route in ROUTES
+  const registeredJids = new Set(Object.keys(ROUTES));
 
   return chats
     .filter((c) => c.jid !== '__group_sync__' && c.is_group)
@@ -226,19 +248,26 @@ export function getAvailableGroups(): AvailableGroup[] {
 }
 
 /** @internal - exported for testing */
-export function _setRegisteredGroups(
-  groups: Record<string, RegisteredGroup>,
-): void {
-  registeredGroups = groups;
+export function _setAgents(newAgents: Record<string, Agent>): void {
+  agents = newAgents;
 }
 
 /**
- * Process all pending messages for a group.
- * Called by the GroupQueue when it's this group's turn.
+ * Resolve agent for a JID using the hardcoded ROUTES map.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
-  if (!group) return true;
+function resolveAgentForJid(jid: string): Agent | null {
+  const agentId = resolveAgentId(jid);
+  if (!agentId) return null;
+  return agents[agentId] || null;
+}
+
+/**
+ * Process all pending messages for a JID.
+ * Called by the GroupQueue when it's this JID's turn.
+ */
+async function processJidMessages(chatJid: string): Promise<boolean> {
+  const agent = resolveAgentForJid(chatJid);
+  if (!agent) return true;
 
   const channel = findChannel(channels, chatJid);
   if (!channel) {
@@ -246,7 +275,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const isMainAgent = agent.id === MAIN_AGENT_ID;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
@@ -261,11 +290,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     missedMessages,
     chatJid,
   );
-  await handleCommandMessages(chatJid, group, channel, commands);
+  await handleCommandMessages(chatJid, agent, channel, commands);
   if (nonCommands.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  // For non-main agents, check if trigger is required and present
+  if (!isMainAgent && agent.requiresTrigger !== false) {
     const hasTrigger = nonCommands.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
@@ -281,7 +310,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { agent: agent.name, messageCount: missedMessages.length },
     'Processing messages',
   );
 
@@ -291,7 +320,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ group: group.name }, 'Idle timeout, closing agent run');
+      logger.debug({ agent: agent.name }, 'Idle timeout, closing agent run');
       queue.closeStdin(chatJid);
     }, IDLE_TIMEOUT);
   };
@@ -300,7 +329,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(agent, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -309,7 +338,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      logger.info({ agent: agent.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
@@ -331,7 +360,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
       logger.warn(
-        { group: group.name },
+        { agent: agent.name },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
       return true;
@@ -340,7 +369,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn(
-      { group: group.name },
+      { agent: agent.name },
       'Agent error, rolled back message cursor for retry',
     );
     return false;
@@ -350,41 +379,45 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 }
 
 async function runAgent(
-  group: RegisteredGroup,
+  agent: Agent,
   prompt: string,
   chatJid: string,
   onOutput?: (output: AgentOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const isMain = agent.id === MAIN_AGENT_ID;
+  // Get or create session for this JID
+  const sessionId =
+    sessions[chatJid] || getOrCreateSessionId(chatJid, agent.id);
+  sessions[chatJid] = sessionId;
+  setSession(chatJid, agent.id, sessionId);
 
   try {
     const output = await runAgentInput(
       {
         prompt,
         sessionId,
-        groupFolder: group.folder,
+        agentId: agent.id,
         chatJid,
         isMain,
-        modelProvider: group.modelProvider,
-        modelName: group.modelName,
+        modelProvider: agent.modelProvider,
+        modelName: agent.modelName,
       },
       onOutput,
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      sessions[chatJid] = output.newSessionId;
+      setSession(chatJid, agent.id, output.newSessionId);
     }
 
     if (output.status === 'error') {
-      logger.error({ group: group.name, error: output.error }, 'Agent error');
+      logger.error({ agent: agent.name, error: output.error }, 'Agent error');
       return 'error';
     }
 
     return 'success';
   } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
+    logger.error({ agent: agent.name, err }, 'Agent error');
     return 'error';
   }
 }
@@ -396,8 +429,12 @@ async function runAgentInput(
   const wrappedOnOutput = onOutput
     ? async (output: AgentOutput) => {
         if (output.newSessionId) {
-          sessions[input.groupFolder] = output.newSessionId;
-          setSession(input.groupFolder, output.newSessionId);
+          sessions[input.chatJid] = output.newSessionId;
+          // Get agent ID from ROUTES
+          const agentId = resolveAgentId(input.chatJid);
+          if (agentId) {
+            setSession(input.chatJid, agentId, output.newSessionId);
+          }
         }
         await onOutput(output);
       }
@@ -405,8 +442,11 @@ async function runAgentInput(
 
   const output = await agentRuntime.run(input, wrappedOnOutput);
   if (output.newSessionId) {
-    sessions[input.groupFolder] = output.newSessionId;
-    setSession(input.groupFolder, output.newSessionId);
+    sessions[input.chatJid] = output.newSessionId;
+    const agentId = resolveAgentId(input.chatJid);
+    if (agentId) {
+      setSession(input.chatJid, agentId, output.newSessionId);
+    }
   }
   return output;
 }
@@ -420,11 +460,13 @@ async function startMessageLoop(): Promise<void> {
 
   logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
 
+  // Get all JIDs that have routes
+  const routedJids = Object.keys(ROUTES);
+
   while (true) {
     try {
-      const jids = Object.keys(registeredGroups);
       const { messages, newTimestamp } = getNewMessages(
-        jids,
+        routedJids,
         lastTimestamp,
         ASSISTANT_NAME,
       );
@@ -436,20 +478,20 @@ async function startMessageLoop(): Promise<void> {
         lastTimestamp = newTimestamp;
         saveState();
 
-        // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
+        // Deduplicate by JID
+        const messagesByJid = new Map<string, NewMessage[]>();
         for (const msg of messages) {
-          const existing = messagesByGroup.get(msg.chat_jid);
+          const existing = messagesByJid.get(msg.chat_jid);
           if (existing) {
             existing.push(msg);
           } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
+            messagesByJid.set(msg.chat_jid, [msg]);
           }
         }
 
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
-          if (!group) continue;
+        for (const [chatJid, jidMessages] of messagesByJid) {
+          const agent = resolveAgentForJid(chatJid);
+          if (!agent) continue;
 
           const channel = findChannel(channels, chatJid);
           if (!channel) {
@@ -460,16 +502,16 @@ async function startMessageLoop(): Promise<void> {
           }
 
           const { commands, nonCommands } = splitCommandMessages(
-            groupMessages,
+            jidMessages,
             chatJid,
           );
-          await handleCommandMessages(chatJid, group, channel, commands);
+          await handleCommandMessages(chatJid, agent, channel, commands);
           if (nonCommands.length === 0) continue;
 
-          const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const isMainAgent = agent.id === MAIN_AGENT_ID;
+          const needsTrigger = !isMainAgent && agent.requiresTrigger !== false;
 
-          // For non-main groups, only act on trigger messages.
+          // For non-main agents, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
@@ -491,7 +533,7 @@ async function startMessageLoop(): Promise<void> {
           const pendingSplit = splitCommandMessages(pendingMessages, chatJid);
           await handleCommandMessages(
             chatJid,
-            group,
+            agent,
             channel,
             pendingSplit.commands,
           );
@@ -523,16 +565,17 @@ async function startMessageLoop(): Promise<void> {
 }
 
 /**
- * Startup recovery: check for unprocessed messages in registered groups.
+ * Startup recovery: check for unprocessed messages in routed JIDs.
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
-  for (const [chatJid, group] of Object.entries(registeredGroups)) {
+  for (const chatJid of Object.keys(ROUTES)) {
     const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
     if (pending.length > 0) {
+      const agent = resolveAgentForJid(chatJid);
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        { jid: chatJid, agent: agent?.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
       queue.enqueueMessageCheck(chatJid);
@@ -541,6 +584,9 @@ function recoverPendingMessages(): void {
 }
 
 async function main(): Promise<void> {
+  // Run migration first (renames groups/ to agents/, moves .nanoclaw/ to sessions/)
+  await runMigration();
+
   initDatabase();
   logger.info('Database initialized');
   loadState();
@@ -565,7 +611,7 @@ async function main(): Promise<void> {
       channel?: string,
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
-    registeredGroups: () => registeredGroups,
+    registeredGroups: () => ({}), // Deprecated, returns empty
   };
 
   // Create and connect channels
@@ -583,7 +629,7 @@ async function main(): Promise<void> {
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
-    registeredGroups: () => registeredGroups,
+    agents: () => agents,
     getSessions: () => sessions,
     queue,
     runAgent: runAgentInput,
@@ -597,7 +643,7 @@ async function main(): Promise<void> {
       if (text) await channel.sendMessage(jid, text);
     },
   });
-  queue.setProcessMessagesFn(processGroupMessages);
+  queue.setProcessMessagesFn(processJidMessages);
   recoverPendingMessages();
   startMessageLoop();
 }

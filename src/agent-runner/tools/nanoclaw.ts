@@ -10,18 +10,19 @@ import {
   getTaskById,
   updateTask,
 } from '../../db.js';
-import { RegisteredGroup } from '../../types.js';
+import { Agent } from '../../types.js';
+import { resolveAgentId, addRoute, ROUTES } from '../../router.js';
 
 export interface NanoClawContext {
   chatJid: string;
-  groupFolder: string;
+  agentId: string;
   isMain: boolean;
 }
 
 export interface NanoClawDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
-  registerGroup: (jid: string, group: RegisteredGroup) => void;
-  getRegisteredGroups: () => Record<string, RegisteredGroup>;
+  registerAgent: (id: string, agent: Agent) => void;
+  getRegisteredAgents: () => Record<string, Agent>;
 }
 
 function formatTaskList(tasks: ReturnType<typeof getAllTasks>): string {
@@ -41,7 +42,7 @@ function scheduleTask(
     schedule_type: 'cron' | 'interval' | 'once';
     schedule_value: string;
     context_mode?: 'group' | 'isolated';
-    target_group_jid?: string;
+    target_jid?: string;
   },
 ): { ok: boolean; message: string } {
   if (args.schedule_type === 'cron') {
@@ -72,18 +73,18 @@ function scheduleTask(
   }
 
   const targetJid =
-    ctx.isMain && args.target_group_jid ? args.target_group_jid : ctx.chatJid;
+    ctx.isMain && args.target_jid ? args.target_jid : ctx.chatJid;
 
-  const registeredGroups = deps.getRegisteredGroups();
-  const targetGroupEntry = registeredGroups[targetJid];
-  if (!targetGroupEntry) {
+  // Check that target JID has a route
+  const targetAgentId = resolveAgentId(targetJid);
+  if (!targetAgentId) {
     return {
       ok: false,
-      message: `Cannot schedule task: target group not registered (${targetJid}).`,
+      message: `Cannot schedule task: target JID not routed (${targetJid}). Add a route in src/router.ts first.`,
     };
   }
 
-  if (!ctx.isMain && targetGroupEntry.folder !== ctx.groupFolder) {
+  if (!ctx.isMain && targetAgentId !== ctx.agentId) {
     return {
       ok: false,
       message: 'Unauthorized schedule_task attempt blocked.',
@@ -111,7 +112,7 @@ function scheduleTask(
 
   createTask({
     id: taskId,
-    group_folder: targetGroupEntry.folder,
+    agent_id: targetAgentId,
     chat_jid: targetJid,
     prompt: args.prompt,
     schedule_type: args.schedule_type,
@@ -150,14 +151,14 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
           .describe('Schedule type'),
         schedule_value: z.string().describe('Schedule value'),
         context_mode: z.enum(['group', 'isolated']).optional(),
-        target_group_jid: z.string().optional(),
+        target_jid: z.string().optional().describe('Target JID (main only)'),
       }),
       execute: async (input: {
         prompt: string;
         schedule_type: 'cron' | 'interval' | 'once';
         schedule_value: string;
         context_mode?: 'group' | 'isolated';
-        target_group_jid?: string;
+        target_jid?: string;
       }) => {
         const result = scheduleTask(deps, ctx, input);
         if (!result.ok) {
@@ -168,13 +169,13 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
     }),
     list_tasks: tool({
       description:
-        "List scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
+        "List scheduled tasks. From main: shows all tasks. From other agents: shows only that agent's tasks.",
       inputSchema: z.object({}).optional(),
       execute: async () => {
         const allTasks = getAllTasks();
         const tasks = ctx.isMain
           ? allTasks
-          : allTasks.filter((t) => t.group_folder === ctx.groupFolder);
+          : allTasks.filter((t) => t.agent_id === ctx.agentId);
         if (tasks.length === 0) {
           return { message: 'No scheduled tasks found.' };
         }
@@ -189,7 +190,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         if (!task) {
           return { error: 'Task not found.' };
         }
-        if (!ctx.isMain && task.group_folder !== ctx.groupFolder) {
+        if (!ctx.isMain && task.agent_id !== ctx.agentId) {
           return { error: 'Unauthorized task pause attempt.' };
         }
         updateTask(input.task_id, { status: 'paused' });
@@ -204,7 +205,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         if (!task) {
           return { error: 'Task not found.' };
         }
-        if (!ctx.isMain && task.group_folder !== ctx.groupFolder) {
+        if (!ctx.isMain && task.agent_id !== ctx.agentId) {
           return { error: 'Unauthorized task resume attempt.' };
         }
         updateTask(input.task_id, { status: 'active' });
@@ -219,7 +220,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         if (!task) {
           return { error: 'Task not found.' };
         }
-        if (!ctx.isMain && task.group_folder !== ctx.groupFolder) {
+        if (!ctx.isMain && task.agent_id !== ctx.agentId) {
           return { error: 'Unauthorized task cancel attempt.' };
         }
         deleteTask(input.task_id);
@@ -229,32 +230,64 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         };
       },
     }),
-    register_group: tool({
-      description: 'Register a new WhatsApp group (main group only).',
+    register_agent: tool({
+      description: 'Register a new agent (main agent only).',
       inputSchema: z.object({
-        jid: z.string().describe('WhatsApp JID'),
+        id: z.string().describe('Agent ID (e.g., "coding-agent")'),
         name: z.string().describe('Display name'),
         folder: z.string().describe('Folder name'),
         trigger: z.string().describe('Trigger word'),
       }),
       execute: async (input: {
-        jid: string;
+        id: string;
         name: string;
         folder: string;
         trigger: string;
       }) => {
         if (!ctx.isMain) {
-          return { error: 'Only the main group can register new groups.' };
+          return { error: 'Only the main agent can register new agents.' };
         }
-        deps.registerGroup(input.jid, {
+
+        // Create agent with required id field
+        const agent: Agent = {
+          id: input.id,
           name: input.name,
           folder: input.folder,
           trigger: input.trigger,
           added_at: new Date().toISOString(),
-        });
+        };
+
+        deps.registerAgent(input.id, agent);
         return {
           ok: true,
-          message: `Group "${input.name}" registered. It will start receiving messages immediately.`,
+          message: `Agent "${input.name}" registered. Add a route in src/router.ts to connect JIDs to this agent.`,
+        };
+      },
+    }),
+    add_route: tool({
+      description:
+        'Add a route from a JID to an agent (main agent only). Modifies the routing table at runtime (not persisted).',
+      inputSchema: z.object({
+        jid: z
+          .string()
+          .describe('JID to route (e.g., "dc:123456789" or "123@g.us")'),
+        agent_id: z.string().describe('Agent ID to route to'),
+      }),
+      execute: async (input: { jid: string; agent_id: string }) => {
+        if (!ctx.isMain) {
+          return { error: 'Only the main agent can add routes.' };
+        }
+
+        // Verify agent exists
+        const agents = deps.getRegisteredAgents();
+        if (!agents[input.agent_id]) {
+          return { error: `Agent "${input.agent_id}" not found.` };
+        }
+
+        addRoute(input.jid, input.agent_id);
+        return {
+          ok: true,
+          message: `Route added: ${input.jid} -> ${input.agent_id}. Note: This route is temporary. Add to src/router.ts ROUTES for persistence.`,
         };
       },
     }),

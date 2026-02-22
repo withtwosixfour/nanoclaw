@@ -3,9 +3,9 @@ import fs from 'fs';
 import path from 'path';
 
 import {
-  GROUPS_DIR,
+  AGENTS_DIR,
   IDLE_TIMEOUT,
-  MAIN_GROUP_FOLDER,
+  MAIN_AGENT_ID,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -18,10 +18,10 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { RegisteredGroup, ScheduledTask } from './types.js';
+import { Agent, ScheduledTask } from './types.js';
 
 export interface SchedulerDependencies {
-  registeredGroups: () => Record<string, RegisteredGroup>;
+  agents: () => Record<string, Agent>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
   runAgent: (
@@ -36,23 +36,19 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
-  const groupDir = path.join(GROUPS_DIR, task.group_folder);
-  fs.mkdirSync(groupDir, { recursive: true });
 
   logger.info(
-    { taskId: task.id, group: task.group_folder },
+    { taskId: task.id, agent: task.agent_id },
     'Running scheduled task',
   );
 
-  const groups = deps.registeredGroups();
-  const group = Object.values(groups).find(
-    (g) => g.folder === task.group_folder,
-  );
+  const agents = deps.agents();
+  const agent = agents[task.agent_id];
 
-  if (!group) {
+  if (!agent) {
     logger.error(
-      { taskId: task.id, groupFolder: task.group_folder },
-      'Group not found for task',
+      { taskId: task.id, agentId: task.agent_id },
+      'Agent not found for task',
     );
     logTaskRun({
       task_id: task.id,
@@ -60,20 +56,20 @@ async function runTask(
       duration_ms: Date.now() - startTime,
       status: 'error',
       result: null,
-      error: `Group not found: ${task.group_folder}`,
+      error: `Agent not found: ${task.agent_id}`,
     });
     return;
   }
 
-  const isMain = task.group_folder === MAIN_GROUP_FOLDER;
+  const isMain = task.agent_id === MAIN_AGENT_ID;
 
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
+  // For group context mode, use the JID's current session
   const sessions = deps.getSessions();
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+    task.context_mode === 'group' ? sessions[task.chat_jid] : undefined;
 
   // Idle timer: closes the active run after IDLE_TIMEOUT of no output.
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,12 +90,12 @@ async function runTask(
       {
         prompt: task.prompt,
         sessionId,
-        groupFolder: task.group_folder,
+        agentId: task.agent_id,
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
-        modelProvider: group.modelProvider,
-        modelName: group.modelName,
+        modelProvider: agent.modelProvider,
+        modelName: agent.modelName,
       },
       async (streamedOutput: AgentOutput) => {
         if (streamedOutput.result) {

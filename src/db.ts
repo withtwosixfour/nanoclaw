@@ -3,12 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
-import {
-  NewMessage,
-  RegisteredGroup,
-  ScheduledTask,
-  TaskRunLog,
-} from './types.js';
+import { Agent, NewMessage, ScheduledTask, TaskRunLog } from './types.js';
 
 let db: Database.Database;
 
@@ -37,7 +32,7 @@ function createSchema(database: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
-      group_folder TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
       chat_jid TEXT NOT NULL,
       prompt TEXT NOT NULL,
       schedule_type TEXT NOT NULL,
@@ -67,33 +62,39 @@ function createSchema(database: Database.Database): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    
+    -- New schema: sessions keyed by JID
     CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT PRIMARY KEY,
+      jid TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
       session_id TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS registered_groups (
-      jid TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
+    
+    -- New schema: agents (replacing registered_groups)
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
       folder TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
       trigger_pattern TEXT NOT NULL,
       added_at TEXT NOT NULL,
       requires_trigger INTEGER DEFAULT 1,
       model_provider TEXT DEFAULT 'opencode-zen',
-      model_name TEXT DEFAULT 'kimi-k2.5'
+      model_name TEXT DEFAULT 'kimi-k2.5',
+      is_main INTEGER DEFAULT 0
     );
+    
+    -- Legacy conversation_history table (for migration)
     CREATE TABLE IF NOT EXISTS conversation_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      group_folder TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
+      group_folder TEXT,
+      session_id TEXT,
+      role TEXT CHECK(role IN ('user','assistant','system','tool')),
       content TEXT,
       tool_calls TEXT,
       tool_results TEXT,
       token_count INTEGER,
-      created_at TEXT NOT NULL
+      created_at TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_history(group_folder, session_id);
-    CREATE INDEX IF NOT EXISTS idx_conversation_created ON conversation_history(created_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -116,34 +117,6 @@ function createSchema(database: Database.Database): void {
       .run(`${ASSISTANT_NAME}:%`);
   } catch {
     /* column already exists */
-  }
-
-  // Add model_provider and model_name columns to registered_groups if missing
-  try {
-    database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN model_provider TEXT DEFAULT 'opencode-zen'`,
-    );
-  } catch {
-    /* column already exists */
-  }
-  try {
-    database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN model_name TEXT DEFAULT 'kimi-k2.5'`,
-    );
-  } catch {
-    /* column already exists */
-  }
-
-  // Migrate existing defaults to OpenCode Zen Kimi K2.5
-  try {
-    database.exec(`
-      UPDATE registered_groups
-      SET model_provider = 'opencode-zen', model_name = 'kimi-k2.5'
-      WHERE (model_provider IS NULL OR model_provider = 'anthropic')
-        AND (model_name IS NULL OR model_name = 'claude-3-5-sonnet-20241022')
-    `);
-  } catch {
-    /* best-effort migration */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
@@ -383,12 +356,12 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
+    INSERT INTO scheduled_tasks (id, agent_id, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
-    task.group_folder,
+    task.agent_id,
     task.chat_jid,
     task.prompt,
     task.schedule_type,
@@ -406,12 +379,12 @@ export function getTaskById(id: string): ScheduledTask | undefined {
     | undefined;
 }
 
-export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
+export function getTasksForAgent(agentId: string): ScheduledTask[] {
   return db
     .prepare(
-      'SELECT * FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC',
+      'SELECT * FROM scheduled_tasks WHERE agent_id = ? ORDER BY created_at DESC',
     )
-    .all(groupFolder) as ScheduledTask[];
+    .all(agentId) as ScheduledTask[];
 }
 
 export function getAllTasks(): ScheduledTask[] {
@@ -526,108 +499,145 @@ export function setRouterState(key: string, value: string): void {
   ).run(key, value);
 }
 
-// --- Session accessors ---
+// --- Session accessors (JID-based) ---
 
-export function getSession(groupFolder: string): string | undefined {
+export function getSession(
+  jid: string,
+): { agentId: string; sessionId: string } | undefined {
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
-  return row?.session_id;
+    .prepare('SELECT agent_id, session_id FROM sessions WHERE jid = ?')
+    .get(jid) as { agent_id: string; session_id: string } | undefined;
+  if (!row) return undefined;
+  return { agentId: row.agent_id, sessionId: row.session_id };
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
+export function setSession(
+  jid: string,
+  agentId: string,
+  sessionId: string,
+): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (jid, agent_id, session_id) VALUES (?, ?, ?)',
+  ).run(jid, agentId, sessionId);
 }
 
-export function deleteSession(groupFolder: string): void {
-  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+export function deleteSession(jid: string): void {
+  db.prepare('DELETE FROM sessions WHERE jid = ?').run(jid);
 }
 
-export function getAllSessions(): Record<string, string> {
+export function getAllSessions(): Record<
+  string,
+  { agentId: string; sessionId: string }
+> {
   const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
-  const result: Record<string, string> = {};
+    .prepare('SELECT jid, agent_id, session_id FROM sessions')
+    .all() as Array<{ jid: string; agent_id: string; session_id: string }>;
+  const result: Record<string, { agentId: string; sessionId: string }> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    result[row.jid] = { agentId: row.agent_id, sessionId: row.session_id };
   }
   return result;
 }
 
-// --- Registered group accessors ---
+// --- Agent accessors (replacing registered_groups) ---
 
-export function getRegisteredGroup(
-  jid: string,
-): (RegisteredGroup & { jid: string }) | undefined {
-  const row = db
-    .prepare('SELECT * FROM registered_groups WHERE jid = ?')
-    .get(jid) as
+export function getAgent(id: string): Agent | undefined {
+  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
     | {
-        jid: string;
-        name: string;
+        id: string;
         folder: string;
+        name: string;
         trigger_pattern: string;
         added_at: string;
         requires_trigger: number | null;
         model_provider: string | null;
         model_name: string | null;
+        is_main: number | null;
       }
     | undefined;
   if (!row) return undefined;
   return {
-    jid: row.jid,
-    name: row.name,
+    id: row.id,
     folder: row.folder,
+    name: row.name,
     trigger: row.trigger_pattern,
     added_at: row.added_at,
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     modelProvider: row.model_provider ?? undefined,
     modelName: row.model_name ?? undefined,
+    isMain: row.is_main === null ? undefined : row.is_main === 1,
   };
 }
 
-export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
+export function setAgent(id: string, agent: Agent): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, requires_trigger, model_provider, model_name)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO agents (id, folder, name, trigger_pattern, added_at, requires_trigger, model_provider, model_name, is_main)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    jid,
-    group.name,
-    group.folder,
-    group.trigger,
-    group.added_at,
-    group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
-    group.modelProvider ?? 'opencode-zen',
-    group.modelName ?? 'kimi-k2.5',
+    id,
+    agent.folder,
+    agent.name,
+    agent.trigger,
+    agent.added_at,
+    agent.requiresTrigger === undefined ? 1 : agent.requiresTrigger ? 1 : 0,
+    agent.modelProvider ?? 'opencode-zen',
+    agent.modelName ?? 'kimi-k2.5',
+    agent.isMain === undefined ? 0 : agent.isMain ? 1 : 0,
   );
 }
 
-export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
-  const rows = db.prepare('SELECT * FROM registered_groups').all() as Array<{
-    jid: string;
-    name: string;
+export function getAllAgents(): Record<string, Agent> {
+  const rows = db.prepare('SELECT * FROM agents').all() as Array<{
+    id: string;
     folder: string;
+    name: string;
     trigger_pattern: string;
     added_at: string;
     requires_trigger: number | null;
     model_provider: string | null;
     model_name: string | null;
+    is_main: number | null;
   }>;
-  const result: Record<string, RegisteredGroup> = {};
+  const result: Record<string, Agent> = {};
   for (const row of rows) {
-    result[row.jid] = {
-      name: row.name,
+    result[row.id] = {
+      id: row.id,
       folder: row.folder,
+      name: row.name,
       trigger: row.trigger_pattern,
       added_at: row.added_at,
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       modelProvider: row.model_provider ?? undefined,
       modelName: row.model_name ?? undefined,
+      isMain: row.is_main === null ? undefined : row.is_main === 1,
     };
+  }
+  return result;
+}
+
+// --- Legacy migration helpers (for backward compatibility) ---
+
+export function getAllRegisteredGroups(): Record<string, Agent> {
+  // Alias for getAllAgents during migration
+  return getAllAgents();
+}
+
+export function setRegisteredGroup(jid: string, group: Agent): void {
+  // Store as agent with id = folder
+  setAgent(group.folder, group);
+}
+
+export function getAllRegisteredGroupsLegacy(): Record<
+  string,
+  Agent & { jid: string }
+> {
+  // For migration purposes - return agents with their JIDs
+  const agents = getAllAgents();
+  const result: Record<string, Agent & { jid: string }> = {};
+  for (const [id, agent] of Object.entries(agents)) {
+    result[id] = { ...agent, jid: id };
   }
   return result;
 }
@@ -664,25 +674,25 @@ function migrateJsonState(): void {
     }
   }
 
-  // Migrate sessions.json
+  // Migrate sessions.json (legacy format: folder -> sessionId)
   const sessions = migrateFile('sessions.json') as Record<
     string,
     string
   > | null;
   if (sessions) {
-    for (const [folder, sessionId] of Object.entries(sessions)) {
-      setSession(folder, sessionId);
-    }
+    // Will be migrated later during agent/session migration
+    setRouterState('legacy_sessions', JSON.stringify(sessions));
   }
 
-  // Migrate registered_groups.json
+  // Migrate registered_groups.json (legacy format: jid -> group)
   const groups = migrateFile('registered_groups.json') as Record<
     string,
-    RegisteredGroup
+    Agent
   > | null;
   if (groups) {
     for (const [jid, group] of Object.entries(groups)) {
-      setRegisteredGroup(jid, group);
+      // Store with folder as the agent id
+      setAgent(group.folder, { ...group, id: group.folder });
     }
   }
 }

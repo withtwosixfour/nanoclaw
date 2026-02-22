@@ -1,7 +1,7 @@
 import path from 'path';
 
 export interface WorkspaceContext {
-  groupDir: string;
+  agentDir: string; // Changed from groupDir
   projectDir: string;
   globalDir: string;
   isMain: boolean;
@@ -20,7 +20,7 @@ export function resolveWorkspacePath(
 ): { resolvedPath?: string; error?: string } {
   const allowProject = options.allowProject ?? ctx.isMain;
   const allowGlobal = options.allowGlobal ?? !ctx.isMain;
-  const defaultCwd = options.defaultCwd || ctx.groupDir;
+  const defaultCwd = options.defaultCwd || ctx.agentDir;
   let mappedPath = inputPath;
 
   if (inputPath.startsWith('/workspace/project')) {
@@ -31,11 +31,15 @@ export function resolveWorkspacePath(
       ctx.projectDir,
       inputPath.slice('/workspace/project'.length),
     );
-  } else if (inputPath.startsWith('/workspace/group')) {
-    mappedPath = path.join(
-      ctx.groupDir,
-      inputPath.slice('/workspace/group'.length),
-    );
+  } else if (
+    inputPath.startsWith('/workspace/agent') ||
+    inputPath.startsWith('/workspace/group')
+  ) {
+    // Support both /workspace/agent and legacy /workspace/group
+    const prefix = inputPath.startsWith('/workspace/agent')
+      ? '/workspace/agent'
+      : '/workspace/group';
+    mappedPath = path.join(ctx.agentDir, inputPath.slice(prefix.length));
   } else if (inputPath.startsWith('/workspace/global')) {
     if (!allowGlobal) {
       return { error: 'Global workspace access is restricted.' };
@@ -51,7 +55,7 @@ export function resolveWorkspacePath(
   }
 
   const resolved = path.resolve(mappedPath);
-  const allowedRoots = [path.resolve(ctx.groupDir)];
+  const allowedRoots = [path.resolve(ctx.agentDir)];
 
   if (allowProject && ctx.isMain) {
     allowedRoots.push(path.resolve(ctx.projectDir));

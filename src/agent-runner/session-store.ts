@@ -4,25 +4,25 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import type { JSONValue, ModelMessage, ToolCallPart, ToolResultPart } from 'ai';
 
-import { GROUPS_DIR } from '../config.js';
+import { SESSIONS_DIR } from '../config.js';
+import { getSessionPath } from '../router.js';
 
 const dbs = new Map<string, Database.Database>();
 
-function getStoreDir(groupFolder: string): string {
-  return path.join(GROUPS_DIR, groupFolder, '.nanoclaw');
+function getSessionDbPath(jid: string): string {
+  const sessionDir = getSessionPath(jid);
+  return path.join(sessionDir, 'conversation.db');
 }
 
-function getDb(groupFolder: string): Database.Database {
-  const existing = dbs.get(groupFolder);
+function getDb(jid: string): Database.Database {
+  const existing = dbs.get(jid);
   if (existing) return existing;
-  const storeDir = getStoreDir(groupFolder);
-  const dbPath = path.join(storeDir, 'conversation.db');
-  fs.mkdirSync(storeDir, { recursive: true });
+  const dbPath = getSessionDbPath(jid);
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversation_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      group_folder TEXT NOT NULL,
       session_id TEXT NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
       content TEXT,
@@ -31,21 +31,22 @@ function getDb(groupFolder: string): Database.Database {
       token_count INTEGER,
       created_at TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_history(group_folder, session_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_history(session_id);
     CREATE INDEX IF NOT EXISTS idx_conversation_created ON conversation_history(created_at);
   `);
-  dbs.set(groupFolder, db);
+  dbs.set(jid, db);
   return db;
 }
 
-function getSessionPath(groupFolder: string): string {
-  return path.join(getStoreDir(groupFolder), 'session.json');
+function getSessionFilePath(jid: string): string {
+  const sessionDir = getSessionPath(jid);
+  return path.join(sessionDir, 'session.json');
 }
 
-export function clearSession(groupFolder: string): void {
-  const sessionPath = getSessionPath(groupFolder);
+export function clearSession(jid: string): void {
+  const sessionFilePath = getSessionFilePath(jid);
   try {
-    fs.unlinkSync(sessionPath);
+    fs.unlinkSync(sessionFilePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw err;
@@ -53,15 +54,21 @@ export function clearSession(groupFolder: string): void {
   }
 }
 
-export function getOrCreateSessionId(groupFolder: string): string {
-  const sessionPath = getSessionPath(groupFolder);
-  fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
-  if (fs.existsSync(sessionPath)) {
+export function getOrCreateSessionId(jid: string, agentId: string): string {
+  const sessionFilePath = getSessionFilePath(jid);
+  fs.mkdirSync(path.dirname(sessionFilePath), { recursive: true });
+  if (fs.existsSync(sessionFilePath)) {
     try {
-      const data = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as {
+      const data = JSON.parse(fs.readFileSync(sessionFilePath, 'utf-8')) as {
         sessionId?: string;
+        agentId?: string;
       };
-      if (data.sessionId) return data.sessionId;
+      if (data.sessionId) {
+        // If agent changed, we should start a new session
+        if (data.agentId === agentId) {
+          return data.sessionId;
+        }
+      }
     } catch {
       // ignore corrupted session file
     }
@@ -69,25 +76,22 @@ export function getOrCreateSessionId(groupFolder: string): string {
 
   const sessionId = randomUUID();
   fs.writeFileSync(
-    sessionPath,
-    JSON.stringify({ sessionId, groupFolder }, null, 2),
+    sessionFilePath,
+    JSON.stringify({ sessionId, agentId, jid }, null, 2),
   );
   return sessionId;
 }
 
-export function loadMessages(
-  groupFolder: string,
-  sessionId: string,
-): ModelMessage[] {
-  const database = getDb(groupFolder);
+export function loadMessages(jid: string, sessionId: string): ModelMessage[] {
+  const database = getDb(jid);
   const rows = database
     .prepare(
       `SELECT role, content, tool_calls, tool_results
        FROM conversation_history
-       WHERE group_folder = ? AND session_id = ?
+       WHERE session_id = ?
        ORDER BY id ASC`,
     )
-    .all(groupFolder, sessionId) as Array<{
+    .all(sessionId) as Array<{
     role: 'user' | 'assistant' | 'system' | 'tool';
     content: string | null;
     tool_calls: string | null;
@@ -98,20 +102,19 @@ export function loadMessages(
 }
 
 export function saveMessage(
-  groupFolder: string,
+  jid: string,
   sessionId: string,
   message: ModelMessage,
   tokenCount?: number | null,
 ): void {
-  const database = getDb(groupFolder);
+  const database = getDb(jid);
   const { role, content, toolCalls, toolResults } = serializeMessage(message);
   database
     .prepare(
-      `INSERT INTO conversation_history (group_folder, session_id, role, content, tool_calls, tool_results, token_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO conversation_history (session_id, role, content, tool_calls, tool_results, token_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      groupFolder,
       sessionId,
       role,
       content,
@@ -122,11 +125,8 @@ export function saveMessage(
     );
 }
 
-export function getSessionTokenCount(
-  groupFolder: string,
-  sessionId: string,
-): number {
-  const database = getDb(groupFolder);
+export function getSessionTokenCount(jid: string, sessionId: string): number {
+  const database = getDb(jid);
   const row = database
     .prepare(
       `SELECT SUM(token_count) as total
@@ -137,60 +137,56 @@ export function getSessionTokenCount(
   return row?.total ?? 0;
 }
 
-export function getSessionMessageCount(
-  groupFolder: string,
-  sessionId: string,
-): number {
-  const database = getDb(groupFolder);
+export function getSessionMessageCount(jid: string, sessionId: string): number {
+  const database = getDb(jid);
   const row = database
     .prepare(
       `SELECT COUNT(*) as count
        FROM conversation_history
-       WHERE group_folder = ? AND session_id = ?`,
+       WHERE session_id = ?`,
     )
-    .get(groupFolder, sessionId) as { count: number } | undefined;
+    .get(sessionId) as { count: number } | undefined;
   return row?.count ?? 0;
 }
 
 export function getSessionLastTimestamp(
-  groupFolder: string,
+  jid: string,
   sessionId: string,
 ): string | null {
-  const database = getDb(groupFolder);
+  const database = getDb(jid);
   const row = database
     .prepare(
       `SELECT created_at
        FROM conversation_history
-       WHERE group_folder = ? AND session_id = ?
+       WHERE session_id = ?
        ORDER BY id DESC
        LIMIT 1`,
     )
-    .get(groupFolder, sessionId) as { created_at: string } | undefined;
+    .get(sessionId) as { created_at: string } | undefined;
   return row?.created_at ?? null;
 }
 
 export function replaceSessionMessages(
-  groupFolder: string,
+  jid: string,
   sessionId: string,
   messages: ModelMessage[],
 ): void {
-  const database = getDb(groupFolder);
+  const database = getDb(jid);
   const deleteStmt = database.prepare(
-    `DELETE FROM conversation_history WHERE group_folder = ? AND session_id = ?`,
+    `DELETE FROM conversation_history WHERE session_id = ?`,
   );
   const insertStmt = database.prepare(
-    `INSERT INTO conversation_history (group_folder, session_id, role, content, tool_calls, tool_results, token_count, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO conversation_history (session_id, role, content, tool_calls, tool_results, token_count, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
 
   const now = new Date().toISOString();
   const insertMany = database.transaction(() => {
-    deleteStmt.run(groupFolder, sessionId);
+    deleteStmt.run(sessionId);
     for (const message of messages) {
       const { role, content, toolCalls, toolResults } =
         serializeMessage(message);
       insertStmt.run(
-        groupFolder,
         sessionId,
         role,
         content,
