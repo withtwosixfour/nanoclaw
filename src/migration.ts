@@ -4,7 +4,13 @@ import Database from 'better-sqlite3';
 import { AGENTS_DIR, SESSIONS_DIR, STORE_DIR } from './config.js';
 import { logger } from './logger.js';
 import { addRoute } from './router.js';
-import { getRouterState, setRouterState, setSession } from './db.js';
+import {
+  getRouterState,
+  setRouterState,
+  setSession,
+  setRoute,
+  setAgent,
+} from './db.js';
 
 interface LegacyGroup {
   jid: string;
@@ -206,11 +212,33 @@ export async function runMigration(): Promise<void> {
           setSession(jid, folderName, sessionId);
         }
 
-        // Add to routes
+        // Add to routes (both in-memory and DB)
         addRoute(jid, folderName);
+        setRoute(jid, folderName);
         routesToAdd.push({ jid, agentId: folderName });
         logger.info({ folder: folderName, jid }, 'Migrated session');
       }
+
+      // Create agent entry in DB for this folder
+      // Check if we have metadata from registered_groups
+      const agentJid = jids[0];
+      const existingGroup = agentJid ? jidToFolderMap.get(agentJid) : undefined;
+
+      // Create agent with defaults
+      const agent = {
+        id: folderName,
+        folder: folderName,
+        name: folderName,
+        trigger: `@${folderName}`,
+        added_at: new Date().toISOString(),
+        requiresTrigger: folderName !== 'main', // main doesn't require trigger
+        modelProvider: 'opencode-zen',
+        modelName: 'kimi-k2.5',
+        isMain: folderName === 'main',
+      };
+
+      setAgent(folderName, agent);
+      logger.info({ folder: folderName }, 'Created agent in database');
 
       // Remove .nanoclaw directory
       try {

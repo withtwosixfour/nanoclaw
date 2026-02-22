@@ -5,6 +5,7 @@ import { Channel, NewMessage } from './types.js';
 /**
  * Hardcoded routing map: JID -> Agent ID
  * Add your Discord channels and WhatsApp groups here.
+ * These take precedence over database routes.
  */
 export const ROUTES: Record<string, string> = {
   // Discord channels - add your channel IDs here
@@ -16,12 +17,29 @@ export const ROUTES: Record<string, string> = {
   // Format: '{phone}@s.whatsapp.net': '{agent-id}'
 };
 
+// Database-backed routes (populated from DB on startup)
+let dbRoutes: Record<string, string> = {};
+
 /**
- * Resolve an agent ID from a JID using the hardcoded ROUTES map.
+ * Load routes from database into memory.
+ * Called during startup after database initialization.
+ */
+export function loadRoutesFromDb(routes: Record<string, string>): void {
+  dbRoutes = routes;
+}
+
+/**
+ * Resolve an agent ID from a JID.
+ * Checks hardcoded ROUTES first, then falls back to database routes.
  * Returns null if no route is defined for this JID.
  */
 export function resolveAgentId(jid: string): string | null {
-  return ROUTES[jid] || null;
+  // Hardcoded routes take precedence
+  if (ROUTES[jid]) {
+    return ROUTES[jid];
+  }
+  // Fall back to database routes
+  return dbRoutes[jid] || null;
 }
 
 /**
@@ -41,7 +59,8 @@ export function getSessionPath(jid: string): string {
 }
 
 /**
- * Add a route to the ROUTES map (useful for dynamic registration during migration).
+ * Add a route to the in-memory ROUTES map.
+ * Note: This only adds to memory. To persist, use setRoute() from db.ts.
  */
 export function addRoute(jid: string, agentId: string): void {
   ROUTES[jid] = agentId;

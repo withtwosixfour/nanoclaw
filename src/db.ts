@@ -63,6 +63,14 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     
+    -- Routes table for persistent JID-to-agent mapping
+    CREATE TABLE IF NOT EXISTS routes (
+      jid TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    
     -- New schema: sessions keyed by JID
     CREATE TABLE IF NOT EXISTS sessions (
       jid TEXT PRIMARY KEY,
@@ -613,6 +621,37 @@ export function getAllAgents(): Record<string, Agent> {
       modelName: row.model_name ?? undefined,
       isMain: row.is_main === null ? undefined : row.is_main === 1,
     };
+  }
+  return result;
+}
+
+// --- Routes accessors ---
+
+export function getRoute(jid: string): string | undefined {
+  const row = db
+    .prepare('SELECT agent_id FROM routes WHERE jid = ?')
+    .get(jid) as { agent_id: string } | undefined;
+  return row?.agent_id;
+}
+
+export function setRoute(jid: string, agentId: string): void {
+  db.prepare(
+    'INSERT OR REPLACE INTO routes (jid, agent_id, created_at) VALUES (?, ?, ?)',
+  ).run(jid, agentId, new Date().toISOString());
+}
+
+export function deleteRoute(jid: string): void {
+  db.prepare('DELETE FROM routes WHERE jid = ?').run(jid);
+}
+
+export function getAllRoutes(): Record<string, string> {
+  const rows = db.prepare('SELECT jid, agent_id FROM routes').all() as Array<{
+    jid: string;
+    agent_id: string;
+  }>;
+  const result: Record<string, string> = {};
+  for (const row of rows) {
+    result[row.jid] = row.agent_id;
   }
   return result;
 }

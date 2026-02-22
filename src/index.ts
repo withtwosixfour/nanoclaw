@@ -23,6 +23,7 @@ import {
   getAllChats,
   getAllAgents,
   getAllSessions,
+  getAllRoutes,
   deleteSession,
   getMessagesSince,
   getNewMessages,
@@ -42,6 +43,7 @@ import {
   resolveAgentId,
   ROUTES,
   addRoute,
+  loadRoutesFromDb,
 } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Agent, Channel, NewMessage } from './types.js';
@@ -594,6 +596,15 @@ async function main(): Promise<void> {
 
   initDatabase();
   logger.info('Database initialized');
+
+  // Load routes from database into memory
+  const dbRoutes = getAllRoutes();
+  loadRoutesFromDb(dbRoutes);
+  logger.info(
+    { routeCount: Object.keys(dbRoutes).length },
+    'Routes loaded from database',
+  );
+
   loadState();
 
   // Graceful shutdown handlers
