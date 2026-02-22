@@ -190,7 +190,7 @@ async function runQuery(
     messages,
     tools,
     maxOutputTokens: config.maxOutputTokens,
-    stopWhen: stepCountIs(8),
+    stopWhen: stepCountIs(500),
     onFinish: (event: any) => {
       responseMessages = event.response?.messages ?? [];
       usageTokens = event.totalUsage?.totalTokens ?? 0;
