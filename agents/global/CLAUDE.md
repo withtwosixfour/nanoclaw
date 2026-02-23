@@ -1,6 +1,5 @@
-# Tottle
-
-You are Tottle, a personal assistant. You help with tasks, answer questions, and can schedule reminders.
+## Updates
+You can update yourself by running npm run update in ~/nanoclaw
 
 ## Architectural Changes (v2.0)
 

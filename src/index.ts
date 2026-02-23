@@ -277,6 +277,15 @@ function resolveAgentForJid(jid: string): Agent | null {
   return agents[agentId] || null;
 }
 
+function ensureSessionForJid(chatJid: string): void {
+  if (sessions[chatJid]) return;
+  const agent = resolveAgentForJid(chatJid);
+  if (!agent) return;
+  const sessionId = getOrCreateSessionId(chatJid, agent.id);
+  sessions[chatJid] = sessionId;
+  setSession(chatJid, agent.id, sessionId);
+}
+
 /**
  * Process all pending messages for a JID.
  * Called by the GroupQueue when it's this JID's turn.
@@ -631,7 +640,10 @@ async function main(): Promise<void> {
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
-    onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onMessage: (chatJid: string, msg: NewMessage) => {
+      storeMessage(msg);
+      ensureSessionForJid(chatJid);
+    },
     onChatMetadata: (
       chatJid: string,
       timestamp: string,
