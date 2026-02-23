@@ -22,9 +22,10 @@ export const SCHEDULER_POLL_INTERVAL = 60000;
 
 const PROJECT_ROOT = process.cwd();
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
+export const AGENTS_DIR = path.resolve(PROJECT_ROOT, 'agents');
+export const SESSIONS_DIR = path.resolve(PROJECT_ROOT, 'sessions');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
-export const MAIN_GROUP_FOLDER = 'main';
+export const MAIN_AGENT_ID = 'main';
 
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep agent run alive after last result
 export const MAX_CONCURRENT_RUNS = Math.max(

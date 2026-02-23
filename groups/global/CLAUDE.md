@@ -2,6 +2,29 @@
 
 You are Tottle, a personal assistant. You help with tasks, answer questions, and can schedule reminders.
 
+## Architectural Changes (v2.0)
+
+**The system has been restructured from a "groups" model to an "agents + sessions" model.**
+
+### Old Approach (Pre-v2.0)
+
+- `groups/{folder}/` - Combined agent configuration AND conversation state
+- Each group folder had `.nanoclaw/` with conversation state
+- JID-to-group mapping was implicit and hard to change
+
+### New Approach (v2.0+)
+
+- `agents/{id}/` - **Agent definitions only** (CLAUDE.md, tools, configuration)
+- `sessions/{jid}/` - **Conversation state per channel** (JID-based)
+- `src/router.ts` - **Explicit routing** from JID to agent via ROUTES map
+- Multiple channels can share the same agent while maintaining independent conversation histories
+
+**Migration:** The system automatically migrates on first startup:
+
+1. Renames `groups/` to `agents/`
+2. Moves `.nanoclaw/*` to `sessions/{jid}/`
+3. Preserves JID mappings from old `registered_groups` table
+
 ## What You Can Do
 
 - Answer questions and have conversations
@@ -36,7 +59,9 @@ When working as a sub-agent or teammate, only use `send_message` if instructed t
 
 ## Your Workspace
 
-Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.
+Files you create are saved in `/workspace/agent/` (formerly `/workspace/group/`). Use this for notes, research, or anything that should persist.
+
+**Note:** The old `/workspace/group/` path has been replaced with `/workspace/agent/` to reflect the new agents/ structure. Sessions are now stored separately per JID in `/workspace/project/sessions/`.
 
 ## Update and Restart (Host)
 

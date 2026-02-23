@@ -1,12 +1,17 @@
-export interface RegisteredGroup {
-  name: string;
-  folder: string;
-  trigger: string;
+export interface Agent {
+  id: string; // Unique identifier (e.g., 'main', 'coding-agent')
+  folder: string; // Folder name in agents/ (same as id by default)
+  name: string; // Display name
+  trigger: string; // Trigger pattern for activation
   added_at: string;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   modelProvider?: string;
   modelName?: string;
+  isMain?: boolean; // Whether this is the main agent with special privileges
 }
+
+// Deprecated: keep for migration compatibility
+export interface RegisteredGroup extends Agent {}
 
 export interface NewMessage {
   id: string;
@@ -21,8 +26,8 @@ export interface NewMessage {
 
 export interface ScheduledTask {
   id: string;
-  group_folder: string;
-  chat_jid: string;
+  agent_id: string; // Changed from group_folder - which agent handles this task
+  chat_jid: string; // Target JID for output
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
@@ -58,6 +63,14 @@ export interface Channel {
 
 // Callback type that channels use to deliver inbound messages
 export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
+
+// Session represents a conversation state for a specific JID
+export interface Session {
+  jid: string; // Channel JID (e.g., 'dc:123', '123@g.us')
+  agentId: string; // Which agent handles this session
+  sessionId: string; // UUID for conversation history
+  lastActivity?: string;
+}
 
 // Callback for chat metadata discovery.
 // name is optional — channels that deliver names inline (Telegram) pass it here;
