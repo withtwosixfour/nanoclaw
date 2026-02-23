@@ -5,6 +5,10 @@ import { z } from 'zod';
 import { tool } from 'ai';
 
 import { resolveWorkspacePath, WorkspaceContext } from '../workspace-paths.js';
+import {
+  isImageFile,
+  getMimeTypeFromExtension,
+} from '../../attachments/images.js';
 
 function resolvePath(
   inputPath: string,
@@ -50,6 +54,20 @@ export function createFsTools(ctx: WorkspaceContext) {
         }
 
         const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
+
+        // Check if this is an image file
+        if (isImageFile(resolved.resolvedPath)) {
+          const mimeType = getMimeTypeFromExtension(resolved.resolvedPath);
+          return {
+            content: `[media attached: ${resolved.resolvedPath} (${mimeType})]`,
+            totalLines: 1,
+            offset: 1,
+            isImage: true,
+            mimeType,
+            path: resolved.resolvedPath,
+          };
+        }
+
         const lines = content.split('\n');
         const offset = Math.max((input.offset || 1) - 1, 0);
         const limit = input.limit ?? lines.length;

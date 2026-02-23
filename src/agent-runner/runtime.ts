@@ -26,6 +26,7 @@ import {
   saveMessage,
 } from './session-store.js';
 import { getRouteInfo } from '../router.js';
+import { detectAndLoadImages } from '../attachments/images.js';
 
 const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
 const DEFAULT_MODEL_NAME = 'kimi-k2.5';
@@ -48,6 +49,10 @@ export interface AgentOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  pendingImageAttachments?: Array<{
+    filePath: string;
+    caption: string;
+  }>;
 }
 
 export interface AvailableGroup {
@@ -245,6 +250,7 @@ async function runQuery(
   newSessionId: string;
   responseText: string;
   usageTokens: number;
+  pendingImageAttachments?: Array<{ filePath: string; caption: string }>;
 }> {
   const queryStartTime = Date.now();
   const config = getModelConfig(input.modelProvider, input.modelName);
@@ -281,7 +287,35 @@ async function runQuery(
   }
   const loadedMessages = loadMessages(input.chatJid, sessionId);
   messages.push(...loadedMessages);
-  messages.push({ role: 'user', content: prompt });
+
+  // Check if model supports vision and inject images if available
+  // Reuse existing config from line 256
+  let userContent:
+    | string
+    | Array<
+        | { type: 'text'; text: string }
+        | { type: 'image'; image: string; mediaType: string }
+      >;
+
+  if (config.supportsVision) {
+    const images = await detectAndLoadImages(prompt);
+    if (images.length > 0) {
+      userContent = [
+        { type: 'text' as const, text: prompt },
+        ...images.map((img) => ({
+          type: 'image' as const,
+          image: img.base64,
+          mediaType: img.mediaType,
+        })),
+      ];
+    } else {
+      userContent = prompt;
+    }
+  } else {
+    userContent = prompt;
+  }
+
+  messages.push({ role: 'user', content: userContent });
 
   logger.debug(
     {
@@ -500,7 +534,43 @@ async function runQuery(
     'Query completed successfully',
   );
 
-  return { newSessionId: sessionId, responseText, usageTokens };
+  // Extract pending image attachments from tool results
+  const pendingImageAttachments: Array<{ filePath: string; caption: string }> =
+    [];
+
+  for (const message of responseMessages) {
+    if (message.role === 'tool') {
+      // Tool result messages contain the results of tool calls
+      const content = message.content;
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (isToolResultPart(part) && part.toolName === 'SendImage') {
+            try {
+              const result =
+                typeof part.output === 'string'
+                  ? JSON.parse(part.output)
+                  : part.output;
+              if (result && result.success && result.filePath) {
+                pendingImageAttachments.push({
+                  filePath: result.filePath,
+                  caption: result.caption || '',
+                });
+              }
+            } catch {
+              // Not JSON or invalid format, skip
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    newSessionId: sessionId,
+    responseText,
+    usageTokens,
+    pendingImageAttachments,
+  };
 }
 
 async function maybeCompactSession(

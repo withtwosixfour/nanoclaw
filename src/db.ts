@@ -3,7 +3,13 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
-import { Agent, NewMessage, ScheduledTask, TaskRunLog } from './types.js';
+import {
+  Agent,
+  Attachment,
+  NewMessage,
+  ScheduledTask,
+  TaskRunLog,
+} from './types.js';
 
 let db: Database.Database;
 
@@ -103,6 +109,20 @@ function createSchema(database: Database.Database): void {
       token_count INTEGER,
       created_at TEXT
     );
+    
+    -- Attachments table for storing file metadata
+    CREATE TABLE IF NOT EXISTS attachments (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      path TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (message_id, chat_jid) REFERENCES messages(id, chat_jid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id, chat_jid);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -758,4 +778,39 @@ function migrateJsonState(): void {
       setAgent(group.folder, { ...group, id: group.folder });
     }
   }
+}
+
+// --- Attachment accessors ---
+
+export function storeAttachment(
+  attachment: Attachment,
+  messageId: string,
+  chatJid: string,
+): void {
+  db.prepare(
+    `INSERT INTO attachments (id, message_id, chat_jid, filename, path, mime_type, size, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    attachment.id,
+    messageId,
+    chatJid,
+    attachment.filename,
+    attachment.path,
+    attachment.mimeType,
+    attachment.size,
+    attachment.createdAt,
+  );
+}
+
+export function getAttachmentsForMessage(
+  messageId: string,
+  chatJid: string,
+): Attachment[] {
+  const rows = db
+    .prepare(
+      `SELECT id, filename, path, mime_type as mimeType, size, created_at as createdAt
+     FROM attachments WHERE message_id = ? AND chat_jid = ?`,
+    )
+    .all(messageId, chatJid) as Attachment[];
+  return rows;
 }
