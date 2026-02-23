@@ -233,6 +233,14 @@ function registerAgent(id: string, agent: Agent): void {
 }
 
 /**
+ * Set registered groups/agents for testing.
+ * @deprecated Use for tests only
+ */
+export function _setRegisteredGroups(newAgents: Record<string, Agent>): void {
+  agents = newAgents;
+}
+
+/**
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
  */

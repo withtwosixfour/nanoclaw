@@ -59,6 +59,7 @@ describe('getAvailableGroups', () => {
 
     _setRegisteredGroups({
       'dc:1234567890123456': {
+        id: 'dc-registered',
         name: 'DC Registered',
         folder: 'dc-registered',
         trigger: '@Andy',
@@ -89,6 +90,7 @@ describe('getAvailableGroups', () => {
 
     _setRegisteredGroups({
       'reg@g.us': {
+        id: 'registered',
         name: 'Registered',
         folder: 'registered',
         trigger: '@Andy',

@@ -106,6 +106,7 @@ function createTestOpts(overrides?: Partial<WhatsAppChannelOpts>): WhatsAppChann
     onChatMetadata: vi.fn(),
     registeredGroups: vi.fn(() => ({
       'registered@g.us': {
+        id: 'test-group',
         name: 'Test Group',
         folder: 'test-group',
         trigger: '@Andy',
@@ -555,6 +556,7 @@ describe('WhatsAppChannel', () => {
       const opts = createTestOpts({
         registeredGroups: vi.fn(() => ({
           '1234567890@s.whatsapp.net': {
+            id: 'self-chat',
             name: 'Self Chat',
             folder: 'self-chat',
             trigger: '@Andy',

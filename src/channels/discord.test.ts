@@ -106,6 +106,7 @@ function createTestOpts(
     onChatMetadata: vi.fn(),
     registeredGroups: vi.fn(() => ({
       'dc:1234567890123456': {
+        id: 'test-server',
         name: 'Test Server #general',
         folder: 'test-server',
         trigger: '@Andy',
@@ -344,6 +345,7 @@ describe('DiscordChannel', () => {
       const opts = createTestOpts({
         registeredGroups: vi.fn(() => ({
           'dc:1234567890123456': {
+            id: 'dm',
             name: 'DM',
             folder: 'dm',
             trigger: '@Andy',

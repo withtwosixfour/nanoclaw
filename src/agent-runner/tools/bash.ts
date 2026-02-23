@@ -45,7 +45,7 @@ export function createBashTool(ctx: WorkspaceContext) {
         {
           allowProject: ctx.isMain,
           allowGlobal: !ctx.isMain,
-          defaultCwd: ctx.groupDir,
+          defaultCwd: ctx.agentDir,
         },
       );
 

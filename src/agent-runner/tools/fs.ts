@@ -14,7 +14,7 @@ function resolvePath(
   return resolveWorkspacePath(inputPath, ctx, {
     allowProject: options.allowProject ?? ctx.isMain,
     allowGlobal: options.allowGlobal ?? !ctx.isMain,
-    defaultCwd: ctx.groupDir,
+    defaultCwd: ctx.agentDir,
   });
 }
 
