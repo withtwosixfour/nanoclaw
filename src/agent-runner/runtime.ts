@@ -292,18 +292,16 @@ async function runQuery(
   const modelConfig = getModelConfig(input.modelProvider, input.modelName);
   let userContent:
     | string
-    | Array<{
-        type: string;
-        text?: string;
-        image?: string;
-        mediaType?: string;
-      }>;
+    | Array<
+        | { type: 'text'; text: string }
+        | { type: 'image'; image: string; mediaType: string }
+      >;
 
   if (modelConfig.supportsVision) {
     const images = await detectAndLoadImages(prompt);
     if (images.length > 0) {
       userContent = [
-        { type: 'text', text: prompt },
+        { type: 'text' as const, text: prompt },
         ...images.map((img) => ({
           type: 'image' as const,
           image: img.base64,
