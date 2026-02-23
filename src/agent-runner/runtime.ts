@@ -542,18 +542,24 @@ async function runQuery(
     if (message.role === 'tool') {
       // Tool result messages contain the results of tool calls
       const content = message.content;
-      if (typeof content === 'string') {
-        try {
-          const result = JSON.parse(content);
-          if (result && result.success && result.filePath) {
-            // This is a SendImage tool result
-            pendingImageAttachments.push({
-              filePath: result.filePath,
-              caption: result.caption || '',
-            });
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (isToolResultPart(part) && part.toolName === 'SendImage') {
+            try {
+              const result =
+                typeof part.output === 'string'
+                  ? JSON.parse(part.output)
+                  : part.output;
+              if (result && result.success && result.filePath) {
+                pendingImageAttachments.push({
+                  filePath: result.filePath,
+                  caption: result.caption || '',
+                });
+              }
+            } catch {
+              // Not JSON or invalid format, skip
+            }
           }
-        } catch {
-          // Not JSON, skip
         }
       }
     }
