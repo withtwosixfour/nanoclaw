@@ -13,6 +13,15 @@ export interface Agent {
 // Deprecated: keep for migration compatibility
 export interface RegisteredGroup extends Agent {}
 
+export interface Attachment {
+  id: string;
+  filename: string;
+  path: string;
+  mimeType: string;
+  size: number;
+  createdAt: string;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -22,6 +31,7 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  attachments?: Attachment[];
 }
 
 export interface ScheduledTask {

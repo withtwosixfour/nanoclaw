@@ -4,6 +4,7 @@ export interface ModelConfig {
   contextWindow: number;
   maxOutputTokens: number;
   compactionThresholdPercent: number;
+  supportsVision: boolean;
 }
 
 const DEFAULT_MODEL_CONFIG: ModelConfig = {
@@ -12,6 +13,7 @@ const DEFAULT_MODEL_CONFIG: ModelConfig = {
   contextWindow: 200000,
   maxOutputTokens: 8192,
   compactionThresholdPercent: 60,
+  supportsVision: true,
 };
 
 const MODEL_CONFIGS: Record<string, ModelConfig> = {

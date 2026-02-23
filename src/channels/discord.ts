@@ -14,6 +14,9 @@ import {
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { logger } from '../logger.js';
 import { resolveAgentId } from '../router.js';
+import { saveAttachment, buildMediaNote } from '../attachments/store.js';
+import { storeAttachment } from '../db.js';
+import type { Attachment } from '../types.js';
 import {
   Channel,
   OnChatMetadata,
@@ -278,26 +281,55 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
         'Discord message received',
       );
 
-      // Handle attachments — store placeholders so the agent knows something was sent
+      // Handle attachments — download and store with media notes
+      const attachments: Attachment[] = [];
+      const mediaNotes: string[] = [];
+
       if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map(
-          (att) => {
-            const contentType = att.contentType || '';
-            if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'}]`;
-            } else if (contentType.startsWith('video/')) {
-              return `[Video: ${att.name || 'video'}]`;
-            } else if (contentType.startsWith('audio/')) {
-              return `[Audio: ${att.name || 'audio'}]`;
-            } else {
-              return `[File: ${att.name || 'file'}]`;
+        for (const att of message.attachments.values()) {
+          try {
+            // Download from Discord CDN
+            const response = await fetch(att.url);
+            if (!response.ok) {
+              logger.warn(
+                { attachment: att.name, status: response.status },
+                'Failed to download Discord attachment',
+              );
+              mediaNotes.push(
+                `[File: ${att.name || 'file'} - download failed]`,
+              );
+              continue;
             }
-          },
-        );
-        if (content) {
-          content = `${content}\n${attachmentDescriptions.join('\n')}`;
-        } else {
-          content = attachmentDescriptions.join('\n');
+
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const mimeType = att.contentType || 'application/octet-stream';
+
+            // Save to filesystem
+            const attachment = await saveAttachment(
+              buffer,
+              att.name || 'attachment',
+              mimeType,
+            );
+            attachments.push(attachment);
+
+            // Build media note
+            mediaNotes.push(buildMediaNote(attachment));
+          } catch (err) {
+            logger.error(
+              { attachment: att.name, error: err },
+              'Error processing Discord attachment',
+            );
+            mediaNotes.push(`[File: ${att.name || 'file'} - error processing]`);
+          }
+        }
+
+        // Append media notes to content
+        if (mediaNotes.length > 0) {
+          if (content) {
+            content = `${content}\n\n${mediaNotes.join('\n')}`;
+          } else {
+            content = mediaNotes.join('\n');
+          }
         }
       }
 
@@ -333,6 +365,11 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
       // Add acknowledgement reaction to show we're processing
       await this.addAcknowledgement(chatJid, message);
 
+      // Store attachment metadata in DB
+      for (const att of attachments) {
+        storeAttachment(att, msgId, chatJid);
+      }
+
       // Deliver message — startMessageLoop() will pick it up
       logger.info(
         { chatJid, chatName, sender: senderName, agentId, messageId: msgId },
@@ -346,6 +383,7 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
         content,
         timestamp,
         is_from_me: false,
+        attachments: attachments.length > 0 ? attachments : undefined,
       });
 
       logger.info(

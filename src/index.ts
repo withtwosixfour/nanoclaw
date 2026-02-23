@@ -33,6 +33,7 @@ import {
   setAgent,
   setRouterState,
   setSession,
+  storeAttachment,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
@@ -833,6 +834,14 @@ async function main(): Promise<void> {
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
       storeMessage(msg);
+
+      // Store attachment metadata if present
+      if (msg.attachments && msg.attachments.length > 0) {
+        for (const att of msg.attachments) {
+          storeAttachment(att, msg.id, chatJid);
+        }
+      }
+
       ensureSessionForJid(chatJid);
     },
     onChatMetadata: (
