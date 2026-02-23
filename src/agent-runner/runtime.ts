@@ -494,6 +494,26 @@ async function maybeCompactSession(
 
   const currentTokens =
     getSessionTokenCount(input.chatJid, sessionId) + (usageTokens || 0);
+
+  logger.debug(
+    {
+      agent: input.agentId,
+      sessionId,
+      contextWindow: config.contextWindow,
+      maxOutputTokens: config.maxOutputTokens,
+      usableTokens: config.contextWindow - config.maxOutputTokens,
+      threshold,
+      thresholdPercent: config.compactionThresholdPercent,
+      currentTokens,
+      tokensToThreshold: Math.max(0, threshold - currentTokens),
+      percentOfThreshold: Math.floor((currentTokens / threshold) * 100),
+      willCompact:
+        currentTokens >= threshold && !activeCompactions.has(sessionId),
+      compactionInProgress: activeCompactions.has(sessionId),
+    },
+    'Compaction check (post-query)',
+  );
+
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
@@ -509,13 +529,46 @@ async function maybeCompactSessionPreflight(
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
-  if (activeCompactions.has(sessionId)) return;
+
+  if (activeCompactions.has(sessionId)) {
+    logger.debug(
+      { agent: input.agentId, sessionId },
+      'Skipping preflight compaction - already in progress',
+    );
+    return;
+  }
 
   const messages = loadMessages(input.chatJid, sessionId);
-  if (messages.length < 4) return;
+  if (messages.length < 4) {
+    logger.debug(
+      { agent: input.agentId, sessionId, messageCount: messages.length },
+      'Skipping preflight compaction - insufficient messages',
+    );
+    return;
+  }
 
   const estimatedTokens =
     estimateTokenCount(messages) + Math.ceil(promptText.length / 4);
+
+  logger.debug(
+    {
+      agent: input.agentId,
+      sessionId,
+      contextWindow: config.contextWindow,
+      maxOutputTokens: config.maxOutputTokens,
+      usableTokens: config.contextWindow - config.maxOutputTokens,
+      threshold,
+      thresholdPercent: config.compactionThresholdPercent,
+      estimatedTokens,
+      promptTokens: Math.ceil(promptText.length / 4),
+      tokensToThreshold: Math.max(0, threshold - estimatedTokens),
+      percentOfThreshold: Math.floor((estimatedTokens / threshold) * 100),
+      willCompact: estimatedTokens >= threshold,
+      messageCount: messages.length,
+    },
+    'Compaction check (pre-flight)',
+  );
+
   if (estimatedTokens < threshold) return;
 
   activeCompactions.add(sessionId);
