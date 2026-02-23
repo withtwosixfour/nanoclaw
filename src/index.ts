@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
+import { getMimeTypeFromExtension } from './attachments/images.js';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
@@ -476,8 +477,7 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
               id: crypto.randomUUID(),
               filename: path.basename(imageAttachment.filePath),
               path: imageAttachment.filePath,
-              mimeType:
-                'image/' + path.extname(imageAttachment.filePath).slice(1),
+              mimeType: getMimeTypeFromExtension(imageAttachment.filePath),
               size: fs.statSync(imageAttachment.filePath).size,
               createdAt: new Date().toISOString(),
             };

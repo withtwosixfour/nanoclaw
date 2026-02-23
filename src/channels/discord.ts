@@ -289,8 +289,10 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
       if (message.attachments.size > 0) {
         for (const att of message.attachments.values()) {
           try {
-            // Download from Discord CDN
-            const response = await fetch(att.url);
+            // Download from Discord CDN with 30 second timeout
+            const response = await fetch(att.url, {
+              signal: AbortSignal.timeout(30000),
+            });
             if (!response.ok) {
               logger.warn(
                 { attachment: att.name, status: response.status },

@@ -289,7 +289,7 @@ async function runQuery(
   messages.push(...loadedMessages);
 
   // Check if model supports vision and inject images if available
-  const modelConfig = getModelConfig(input.modelProvider, input.modelName);
+  // Reuse existing config from line 256
   let userContent:
     | string
     | Array<
@@ -297,7 +297,7 @@ async function runQuery(
         | { type: 'image'; image: string; mediaType: string }
       >;
 
-  if (modelConfig.supportsVision) {
+  if (config.supportsVision) {
     const images = await detectAndLoadImages(prompt);
     if (images.length > 0) {
       userContent = [
