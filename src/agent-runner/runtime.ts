@@ -843,7 +843,6 @@ function extractContentText(message: ModelMessage): string | null {
   if (Array.isArray(content)) {
     return content
       .map((part) => {
-        if (typeof part === 'string') return part;
         if (isTextPart(part)) {
           return part.text ?? '';
         }
@@ -880,7 +879,12 @@ function extractToolCalls(message: ModelMessage): Array<{
 }
 
 function isTextPart(part: unknown): part is { text: string | undefined } {
-  return !!part && typeof part === 'object' && 'text' in part;
+  return (
+    !!part &&
+    typeof part === 'object' &&
+    (part as { type?: unknown }).type === 'text' &&
+    'text' in part
+  );
 }
 
 function isToolCallPart(part: unknown): part is ToolCallPart {

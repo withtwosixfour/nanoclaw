@@ -284,7 +284,6 @@ function extractContentText(message: ModelMessage): string | null {
   if (Array.isArray(content)) {
     return content
       .map((part) => {
-        if (typeof part === 'string') return part;
         if (isTextPart(part)) {
           return part.text ?? '';
         }
@@ -336,26 +335,28 @@ function toolOutputToText(output: JSONValue | unknown): string {
   }
 }
 
-function isTextPart(part: unknown): part is { text: string | undefined } {
-  return !!part && typeof part === 'object' && 'text' in part;
-}
-
-function isToolCallPart(part: unknown): part is ToolCallPart {
+function isTextPart(part: ModelMessage['content'][number]) {
   return (
-    !!part &&
-    typeof part === 'object' &&
-    (part as { type?: unknown }).type === 'tool-call' &&
-    typeof (part as { toolName?: unknown }).toolName === 'string' &&
-    typeof (part as { toolCallId?: unknown }).toolCallId === 'string'
+    !!part && typeof part === 'object' && part.type === 'text' && 'text' in part
   );
 }
 
-function isToolResultPart(part: unknown): part is ToolResultPart {
+function isToolCallPart(part: ModelMessage['content'][number]) {
   return (
     !!part &&
     typeof part === 'object' &&
-    (part as { type?: unknown }).type === 'tool-result' &&
-    typeof (part as { toolName?: unknown }).toolName === 'string' &&
-    typeof (part as { toolCallId?: unknown }).toolCallId === 'string'
+    part.type === 'tool-call' &&
+    typeof part.toolName === 'string' &&
+    typeof part.toolCallId === 'string'
+  );
+}
+
+function isToolResultPart(part: ModelMessage['content'][number]) {
+  return (
+    !!part &&
+    typeof part === 'object' &&
+    part.type === 'tool-result' &&
+    typeof part.toolName === 'string' &&
+    typeof part.toolCallId === 'string'
   );
 }
