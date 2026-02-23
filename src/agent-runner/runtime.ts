@@ -92,17 +92,89 @@ function readSecrets(): AgentSecrets {
   ]);
 }
 
+// File watching cache for CLAUDE.md files
+interface FileCache {
+  content: string;
+  mtime: number;
+  watcher?: fs.FSWatcher;
+}
+
+const fileCache = new Map<string, FileCache>();
+
+function getCachedFileContent(filePath: string): string | null {
+  if (!fs.existsSync(filePath)) {
+    // Clean up watcher if file no longer exists
+    const cached = fileCache.get(filePath);
+    if (cached?.watcher) {
+      cached.watcher.close();
+    }
+    fileCache.delete(filePath);
+    return null;
+  }
+
+  const stats = fs.statSync(filePath);
+  const cached = fileCache.get(filePath);
+
+  // If we have a cached version and the file hasn't changed, return it
+  if (cached && cached.mtime === stats.mtimeMs) {
+    return cached.content;
+  }
+
+  // File has changed or not cached, read and cache it
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    // Set up file watcher if not already watching
+    if (!cached?.watcher) {
+      const watcher = fs.watch(filePath, (eventType) => {
+        if (eventType === 'change') {
+          logger.debug({ filePath }, 'CLAUDE.md file changed, clearing cache');
+          // Get the entry and remove from cache first, then close watcher
+          // This prevents race conditions if the callback fires rapidly
+          const entry = fileCache.get(filePath);
+          fileCache.delete(filePath);
+          if (entry?.watcher) {
+            entry.watcher.close();
+          }
+        }
+      });
+
+      fileCache.set(filePath, {
+        content,
+        mtime: stats.mtimeMs,
+        watcher,
+      });
+    } else {
+      // Update cache with new content and mtime
+      fileCache.set(filePath, {
+        content,
+        mtime: stats.mtimeMs,
+        watcher: cached.watcher,
+      });
+    }
+
+    return content;
+  } catch (err) {
+    logger.error({ filePath, err }, 'Failed to read CLAUDE.md file');
+    return null;
+  }
+}
+
 function buildSystemPrompt(agentId: string, isMain: boolean): string {
   const agentClaude = path.join(AGENTS_DIR, agentId, 'CLAUDE.md');
   const globalClaude = path.join(AGENTS_DIR, 'global', 'CLAUDE.md');
   const parts: string[] = [];
 
-  if (fs.existsSync(agentClaude)) {
-    parts.push(fs.readFileSync(agentClaude, 'utf-8').trim());
+  const agentContent = getCachedFileContent(agentClaude);
+  if (agentContent) {
+    parts.push(agentContent.trim());
   }
 
-  if (!isMain && fs.existsSync(globalClaude)) {
-    parts.push(fs.readFileSync(globalClaude, 'utf-8').trim());
+  if (!isMain) {
+    const globalContent = getCachedFileContent(globalClaude);
+    if (globalContent) {
+      parts.push(globalContent.trim());
+    }
   }
 
   return parts.filter(Boolean).join('\n\n');
@@ -113,9 +185,20 @@ function createModel(
   modelName: string,
   secrets?: AgentSecrets,
 ) {
+  const hasApiKey =
+    secrets?.OPENCODE_ZEN_API_KEY || process.env.OPENCODE_ZEN_API_KEY
+      ? true
+      : secrets?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY
+        ? true
+        : false;
+
   if (configProvider === 'opencode-zen') {
     const apiKey =
       secrets?.OPENCODE_ZEN_API_KEY || process.env.OPENCODE_ZEN_API_KEY;
+    logger.debug(
+      { provider: configProvider, model: modelName, hasApiKey },
+      'Creating OpenAI-compatible model',
+    );
     const provider = createOpenAICompatible({
       name: 'opencode-zen',
       baseURL: 'https://opencode.ai/zen/v1',
@@ -127,12 +210,22 @@ function createModel(
 
   if (configProvider !== 'anthropic') {
     logger.warn(
-      `Unknown provider ${configProvider}, falling back to anthropic`,
+      { provider: configProvider, fallback: 'anthropic' },
+      `Unknown provider, falling back to anthropic`,
     );
   }
   const apiKey = secrets?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
   const authToken =
     secrets?.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_AUTH_TOKEN;
+  logger.debug(
+    {
+      provider: 'anthropic',
+      model: modelName,
+      hasApiKey,
+      hasAuthToken: !!authToken,
+    },
+    'Creating Anthropic model',
+  );
   const provider = createAnthropic({
     ...(apiKey ? { apiKey } : {}),
     ...(authToken ? { authToken } : {}),
@@ -151,7 +244,23 @@ async function runQuery(
   responseText: string;
   usageTokens: number;
 }> {
+  const queryStartTime = Date.now();
   const config = getModelConfig(input.modelProvider, input.modelName);
+
+  logger.info(
+    {
+      agent: input.agentId,
+      sessionId,
+      chatJid: input.chatJid,
+      provider: config.provider,
+      model: config.modelName,
+      maxOutputTokens: config.maxOutputTokens,
+      promptLength: prompt.length,
+      isScheduledTask: input.isScheduledTask,
+    },
+    'Starting model query',
+  );
+
   const model = createModel(config.provider, config.modelName, secrets);
 
   const systemPrompt = buildSystemPrompt(input.agentId, input.isMain);
@@ -168,8 +277,20 @@ async function runQuery(
   } else {
     messages.push({ role: 'system', content: routeContext });
   }
-  messages.push(...loadMessages(input.chatJid, sessionId));
+  const loadedMessages = loadMessages(input.chatJid, sessionId);
+  messages.push(...loadedMessages);
   messages.push({ role: 'user', content: prompt });
+
+  logger.debug(
+    {
+      agent: input.agentId,
+      sessionId,
+      messageCount: messages.length,
+      systemPromptLength: systemPrompt?.length || 0,
+      historyMessageCount: loadedMessages.length,
+    },
+    'Loaded messages for query',
+  );
 
   const agentDir = path.join(AGENTS_DIR, input.agentId);
   const tools = createToolRegistry({
@@ -193,37 +314,142 @@ async function runQuery(
 
   let responseMessages: ModelMessage[] = [];
   let usageTokens = 0;
+  let responseText = '';
+  let chunkCount = 0;
+  let lastChunkTime = Date.now();
 
-  const result = streamText({
-    model,
-    messages,
-    tools,
-    maxOutputTokens: config.maxOutputTokens,
-    stopWhen: stepCountIs(500),
-    onFinish: (event: any) => {
-      responseMessages = event.response?.messages ?? [];
-      usageTokens = event.totalUsage?.totalTokens ?? 0;
-    },
-  });
+  logger.info(
+    { agent: input.agentId, sessionId, model: config.modelName },
+    'Calling streamText',
+  );
 
-  // Consume the stream to drive the completion, but we get the final
-  // response from responseMessages which is more reliable (especially
-  // when tools are used)
-  for await (const _chunk of result.textStream) {
-    // Stream is consumed to trigger onFinish
+  const streamStartTime = Date.now();
+  let streamError: Error | null = null;
+
+  try {
+    const result = streamText({
+      model,
+      messages,
+      tools,
+      maxOutputTokens: config.maxOutputTokens,
+      stopWhen: stepCountIs(500),
+      onFinish: (event: any) => {
+        responseMessages = event.response?.messages ?? [];
+        usageTokens = event.totalUsage?.totalTokens ?? 0;
+        logger.debug(
+          {
+            agent: input.agentId,
+            sessionId,
+            responseMessageCount: responseMessages.length,
+            usageTokens,
+            finishReason: event.finishReason,
+          },
+          'streamText onFinish callback',
+        );
+      },
+    });
+
+    // Consume the stream to drive completion
+    for await (const chunk of result.textStream) {
+      chunkCount++;
+      const now = Date.now();
+      const timeSinceLastChunk = now - lastChunkTime;
+      lastChunkTime = now;
+
+      // Log every 50 chunks and warn if chunks are taking too long
+      if (chunkCount % 50 === 0) {
+        logger.debug(
+          {
+            agent: input.agentId,
+            sessionId,
+            chunkCount,
+            timeSinceLastChunk,
+          },
+          'Streaming in progress',
+        );
+      }
+
+      if (timeSinceLastChunk > 30000) {
+        logger.warn(
+          {
+            agent: input.agentId,
+            sessionId,
+            chunkCount,
+            timeSinceLastChunk,
+          },
+          'Long delay between chunks (>30s)',
+        );
+      }
+    }
+
+    const streamDuration = Date.now() - streamStartTime;
+    logger.info(
+      {
+        agent: input.agentId,
+        sessionId,
+        chunkCount,
+        streamDurationMs: streamDuration,
+        usageTokens,
+      },
+      'Streaming completed',
+    );
+  } catch (err) {
+    streamError = err instanceof Error ? err : new Error(String(err));
+    const streamDuration = Date.now() - streamStartTime;
+    logger.error(
+      {
+        agent: input.agentId,
+        sessionId,
+        error: streamError.message,
+        stack: streamError.stack,
+        chunkCount,
+        model: config.modelName,
+        provider: config.provider,
+      },
+      'streamText failed',
+    );
+    throw streamError;
   }
 
-  // Extract final assistant response from messages
-  let responseText = '';
+  // Extract final assistant response from messages (more reliable, especially when tools are used)
   if (responseMessages.length > 0) {
     const lastAssistant = responseMessages
       .filter((m) => m.role === 'assistant')
       .pop();
     if (lastAssistant) {
       responseText = extractContentText(lastAssistant) || '';
+      logger.debug(
+        {
+          agent: input.agentId,
+          sessionId,
+          responseLength: responseText.length,
+        },
+        'Extracted response from messages',
+      );
     }
   }
 
+  // Fallback: if no assistant message in responseMessages but we have stream text
+  if (!responseText && chunkCount > 0) {
+    logger.warn(
+      { agent: input.agentId, sessionId, chunkCount },
+      'No assistant message in responseMessages, stream may have had text',
+    );
+  }
+
+  if (responseMessages.length === 0) {
+    logger.warn(
+      {
+        agent: input.agentId,
+        sessionId,
+        chunkCount,
+        responseLength: responseText.length,
+      },
+      'No response messages after streaming - possible model failure',
+    );
+  }
+
+  // Save messages to session store
   saveMessage(
     input.chatJid,
     sessionId,
@@ -238,6 +464,21 @@ async function runQuery(
     if (tokenCount != null) tokenAssigned = true;
     saveMessage(input.chatJid, sessionId, message, tokenCount);
   }
+
+  const totalDuration = Date.now() - queryStartTime;
+  logger.info(
+    {
+      agent: input.agentId,
+      sessionId,
+      responseLength: responseText.length,
+      responseMessageCount: responseMessages.length,
+      usageTokens,
+      chunkCount,
+      totalDurationMs: totalDuration,
+      streamDurationMs: Date.now() - streamStartTime,
+    },
+    'Query completed successfully',
+  );
 
   return { newSessionId: sessionId, responseText, usageTokens };
 }
@@ -287,19 +528,58 @@ async function compactSession(
   sessionId: string,
   secrets: AgentSecrets,
 ): Promise<void> {
+  const compactionStart = Date.now();
+  logger.info(
+    { agent: input.agentId, sessionId, chatJid: input.chatJid },
+    'Starting session compaction',
+  );
+
   try {
     const messages = loadMessages(input.chatJid, sessionId);
-    if (messages.length < 4) return;
+    if (messages.length < 4) {
+      logger.debug(
+        { agent: input.agentId, sessionId, messageCount: messages.length },
+        'Skipping compaction - insufficient messages',
+      );
+      return;
+    }
 
     const userIndexes = messages
       .map((msg, idx) => (msg.role === 'user' ? idx : -1))
       .filter((idx) => idx !== -1) as number[];
-    if (userIndexes.length < 2) return;
+    if (userIndexes.length < 2) {
+      logger.debug(
+        {
+          agent: input.agentId,
+          sessionId,
+          userMessageCount: userIndexes.length,
+        },
+        'Skipping compaction - insufficient user messages',
+      );
+      return;
+    }
 
     const splitIndex = userIndexes[userIndexes.length - 2];
     const older = messages.slice(0, splitIndex);
     const recent = messages.slice(splitIndex);
-    if (older.length === 0) return;
+    if (older.length === 0) {
+      logger.debug(
+        { agent: input.agentId, sessionId },
+        'Skipping compaction - no older messages',
+      );
+      return;
+    }
+
+    logger.info(
+      {
+        agent: input.agentId,
+        sessionId,
+        totalMessages: messages.length,
+        olderMessages: older.length,
+        recentMessages: recent.length,
+      },
+      'Compacting session - archiving and summarizing',
+    );
 
     archiveConversation(input.chatJid, sessionId, messages);
 
@@ -308,6 +588,14 @@ async function compactSession(
 
     const summaryPrompt = buildSummaryPrompt(older);
     let summaryText = '';
+    let summaryChunkCount = 0;
+    const summaryStreamStart = Date.now();
+
+    logger.debug(
+      { agent: input.agentId, sessionId, promptLength: summaryPrompt.length },
+      'Calling streamText for summary',
+    );
+
     const summaryResult = streamText({
       model,
       messages: [
@@ -323,7 +611,10 @@ async function compactSession(
 
     for await (const chunk of summaryResult.textStream) {
       summaryText += chunk;
+      summaryChunkCount++;
     }
+
+    const summaryDuration = Date.now() - summaryStreamStart;
 
     const summaryMessage: ModelMessage = {
       role: 'system',
@@ -334,10 +625,31 @@ async function compactSession(
       summaryMessage,
       ...recent,
     ]);
-    logger.debug(`Session ${sessionId} compacted (${older.length} -> summary)`);
+
+    const totalDuration = Date.now() - compactionStart;
+    logger.info(
+      {
+        agent: input.agentId,
+        sessionId,
+        olderMessageCount: older.length,
+        summaryLength: summaryText.length,
+        summaryChunkCount,
+        summaryDurationMs: summaryDuration,
+        totalDurationMs: totalDuration,
+      },
+      'Session compacted successfully',
+    );
   } catch (err) {
-    logger.warn(
-      `Compaction failed: ${err instanceof Error ? err.message : String(err)}`,
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error(
+      {
+        agent: input.agentId,
+        sessionId,
+        error: error.message,
+        stack: error.stack,
+        durationMs: Date.now() - compactionStart,
+      },
+      'Compaction failed',
     );
   }
 }
@@ -578,10 +890,35 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     onOutput?: (output: AgentOutput) => Promise<void>,
   ): Promise<AgentOutput> => {
     const startTime = Date.now();
+    const runId = `${input.agentId}-${startTime}`;
     const secrets = readSecrets();
+
+    logger.info(
+      {
+        runId,
+        agent: input.agentId,
+        chatJid: input.chatJid,
+        sessionId: input.sessionId,
+        promptLength: input.prompt.length,
+        isScheduledTask: input.isScheduledTask,
+        modelProvider: input.modelProvider,
+        modelName: input.modelName,
+      },
+      'Agent run starting',
+    );
 
     if (!input.modelProvider) input.modelProvider = DEFAULT_MODEL_PROVIDER;
     if (!input.modelName) input.modelName = DEFAULT_MODEL_NAME;
+
+    logger.debug(
+      {
+        runId,
+        agent: input.agentId,
+        provider: input.modelProvider,
+        model: input.modelName,
+      },
+      'Using model configuration',
+    );
 
     const agentDir = path.join(AGENTS_DIR, input.agentId);
     fs.mkdirSync(agentDir, { recursive: true });
@@ -602,7 +939,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     const pending = drainPipe(pipe);
     if (pending.length > 0) {
       logger.debug(
-        { agent: input.agentId, count: pending.length },
+        { runId, agent: input.agentId, count: pending.length },
         'Draining pending piped messages into initial prompt',
       );
       prompt += '\n' + pending.join('\n');
@@ -612,14 +949,19 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     let lastResponse: string | null = null;
     let hadError = false;
     let errorMessage = '';
+    let queryCount = 0;
 
     try {
       while (true) {
-        logger.debug(
-          { agent: input.agentId, sessionId },
-          'Starting agent query',
+        queryCount++;
+        logger.info(
+          { runId, agent: input.agentId, sessionId, queryCount },
+          'Starting agent query iteration',
         );
+
+        const queryIterationStart = Date.now();
         await maybeCompactSessionPreflight(input, sessionId, prompt, secrets);
+
         const { newSessionId, responseText, usageTokens } = await runQuery(
           prompt,
           sessionId,
@@ -629,15 +971,41 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         );
         sessionId = newSessionId;
 
+        const queryIterationDuration = Date.now() - queryIterationStart;
+        logger.info(
+          {
+            runId,
+            agent: input.agentId,
+            sessionId,
+            queryCount,
+            queryDurationMs: queryIterationDuration,
+            responseLength: responseText.length,
+            usageTokens,
+          },
+          'Query iteration completed',
+        );
+
         // Store this response and emit it immediately
         if (responseText) {
           lastResponse = responseText;
           if (onOutput) {
+            logger.debug(
+              {
+                runId,
+                agent: input.agentId,
+                responseLength: responseText.length,
+              },
+              'Calling onOutput callback with response',
+            );
             await onOutput({
               status: 'success',
               result: responseText,
               newSessionId: sessionId,
             });
+            logger.debug(
+              { runId, agent: input.agentId },
+              'onOutput callback completed',
+            );
           }
         }
 
@@ -645,23 +1013,53 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
         const nextMessage = await waitForPipeMessage(pipe);
         if (nextMessage === null) {
-          logger.debug(
-            { agent: input.agentId, durationMs: Date.now() - startTime },
-            'Agent run closed',
+          logger.info(
+            {
+              runId,
+              agent: input.agentId,
+              durationMs: Date.now() - startTime,
+              queryCount,
+            },
+            'Agent run closed - no more piped messages',
           );
           break;
         }
         prompt = nextMessage;
+        logger.debug(
+          {
+            runId,
+            agent: input.agentId,
+            nextMessageLength: nextMessage.length,
+          },
+          'Received piped message for next iteration',
+        );
       }
 
       // Send completion marker
       if (onOutput) {
+        logger.debug(
+          { runId, agent: input.agentId },
+          'Sending completion marker',
+        );
         await onOutput({
           status: 'success',
           result: null,
           newSessionId: sessionId,
         });
       }
+
+      const totalDuration = Date.now() - startTime;
+      logger.info(
+        {
+          runId,
+          agent: input.agentId,
+          totalDurationMs: totalDuration,
+          queryCount,
+          finalSessionId: sessionId,
+          resultLength: lastResponse?.length || 0,
+        },
+        'Agent run completed successfully',
+      );
 
       return {
         status: 'success',
@@ -670,14 +1068,27 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       };
     } catch (err) {
       errorMessage = err instanceof Error ? err.message : String(err);
+      const errorStack = err instanceof Error ? err.stack : undefined;
       hadError = true;
       logger.error(
-        { agent: input.agentId, error: errorMessage },
-        'Agent error',
+        {
+          runId,
+          agent: input.agentId,
+          error: errorMessage,
+          stack: errorStack,
+          queryCount,
+          durationMs: Date.now() - startTime,
+          sessionId,
+        },
+        'Agent run error',
       );
     } finally {
       activeRuns.delete(input.chatJid);
       closePipe(pipe);
+      logger.debug(
+        { runId, agent: input.agentId, activeRunsCount: activeRuns.size },
+        'Cleaned up agent run',
+      );
     }
 
     // Handle error case - send the last response we got before the error
@@ -688,6 +1099,10 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         newSessionId: sessionId,
         error: errorMessage,
       };
+      logger.info(
+        { runId, agent: input.agentId, hasPartialResult: !!lastResponse },
+        'Sending error output with partial result',
+      );
       if (onOutput) await onOutput(output);
       return output;
     }

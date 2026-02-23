@@ -6,6 +6,7 @@ import type { JSONValue, ModelMessage, ToolCallPart, ToolResultPart } from 'ai';
 
 import { SESSIONS_DIR } from '../config.js';
 import { getSessionPath } from '../router.js';
+import { logger } from '../logger.js';
 
 const dbs = new Map<string, Database.Database>();
 
@@ -50,6 +51,32 @@ export function clearSession(jid: string): void {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw err;
+    }
+  }
+
+  // Close the database connection before deleting the file
+  const db = dbs.get(jid);
+  if (db) {
+    try {
+      db.close();
+    } catch (err) {
+      logger?.warn?.(
+        { jid, err },
+        'Error closing database connection during clear',
+      );
+    }
+    dbs.delete(jid);
+  }
+
+  // Also clear the conversation history from the database
+  const dbPath = getSessionDbPath(jid);
+  if (fs.existsSync(dbPath)) {
+    try {
+      fs.unlinkSync(dbPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
     }
   }
 }
