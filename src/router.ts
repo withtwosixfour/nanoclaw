@@ -14,11 +14,42 @@ export function loadRoutesFromDb(routes: Record<string, string>): void {
 }
 
 /**
+ * Convert a glob pattern to a regex.
+ * Only supports * wildcards.
+ */
+function globToRegex(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('^' + escaped.replace(/\*/g, '.*') + '$');
+}
+
+/**
+ * Calculate pattern specificity (more non-wildcard chars = more specific).
+ */
+function patternSpecificity(pattern: string): number {
+  return pattern.replace(/\*/g, '').length;
+}
+
+/**
  * Resolve an agent ID from a JID.
  * Returns null if no route is defined for this JID.
+ * Supports wildcard patterns using * (e.g., "whatsapp:*", "dc:*", "*").
  */
 export function resolveAgentId(jid: string): string | null {
-  return dbRoutes[jid] || null;
+  // Fast path: exact match
+  if (dbRoutes[jid]) return dbRoutes[jid];
+
+  // Check wildcard patterns (sorted by specificity descending)
+  const patterns = Object.keys(dbRoutes)
+    .filter((p) => p.includes('*'))
+    .sort((a, b) => patternSpecificity(b) - patternSpecificity(a));
+
+  for (const pattern of patterns) {
+    if (globToRegex(pattern).test(jid)) {
+      return dbRoutes[pattern];
+    }
+  }
+
+  return null;
 }
 
 /**

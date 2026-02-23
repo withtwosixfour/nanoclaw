@@ -267,11 +267,13 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
     }),
     add_route: tool({
       description:
-        'Add a route from a JID to an agent (main agent only). Routes are persisted to the database and survive restarts.',
+        'Add a route from a JID pattern to an agent (main agent only). Routes are persisted to the database and survive restarts. Use * for wildcards (e.g., "whatsapp:*", "dc:*", "*").',
       inputSchema: z.object({
         jid: z
           .string()
-          .describe('JID to route (e.g., "dc:123456789" or "123@g.us")'),
+          .describe(
+            'JID pattern to route (e.g., "dc:123456789", "whatsapp:*", "*")',
+          ),
         agent_id: z.string().describe('Agent ID to route to'),
       }),
       execute: async (input: { jid: string; agent_id: string }) => {
