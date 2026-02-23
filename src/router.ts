@@ -120,12 +120,12 @@ export function formatMessages(messages: NewMessage[]): string {
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
-export function stripInternalTags(text: string): string {
-  return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+export function stripReasoningTags(text: string): string {
+  return text.replace(/<reasoning>[\s\S]*?<\/reasoning>/g, '').trim();
 }
 
 export function formatOutbound(rawText: string): string {
-  const text = stripInternalTags(rawText);
+  const text = stripReasoningTags(rawText);
   if (!text) return '';
   return text;
 }

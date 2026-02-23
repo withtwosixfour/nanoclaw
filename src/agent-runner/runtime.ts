@@ -3,6 +3,8 @@ import path from 'path';
 import {
   streamText,
   stepCountIs,
+  extractReasoningMiddleware,
+  wrapLanguageModel,
   type ModelMessage,
   type ToolCallPart,
   type ToolResultPart,
@@ -327,8 +329,14 @@ async function runQuery(
   let streamError: Error | null = null;
 
   try {
-    const result = streamText({
+    // Wrap model with reasoning extraction middleware
+    const wrappedModel = wrapLanguageModel({
       model,
+      middleware: extractReasoningMiddleware({ tagName: 'reasoning' }),
+    });
+
+    const result = streamText({
+      model: wrappedModel,
       messages,
       tools,
       maxOutputTokens: config.maxOutputTokens,

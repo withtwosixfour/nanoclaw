@@ -1,4 +1,5 @@
 ## Updates
+
 You can update yourself by running npm run update in ~/nanoclaw
 
 ## Architectural Changes (v2.0)
@@ -42,15 +43,15 @@ You also have `mcp__nanoclaw__send_message` which sends a message immediately wh
 
 ### Internal thoughts
 
-If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:
+If part of your output is internal reasoning rather than something for the user, wrap it in `<reasoning>` tags:
 
 ```
-<internal>Compiled all three reports, ready to summarize.</internal>
+<reasoning>Compiled all three reports, ready to summarize.</reasoning>
 
 Here are the key findings from the research...
 ```
 
-Text inside `<internal>` tags is logged but not sent to the user. If you've already sent the key information via `send_message`, you can wrap the recap in `<internal>` to avoid sending it again.
+Text inside `<reasoning>` tags is logged but not sent to the user. If you've already sent the key information via `send_message`, you can wrap the recap in `<reasoning>` to avoid sending it again.
 
 ### Sub-agents and teammates
 

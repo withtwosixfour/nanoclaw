@@ -405,17 +405,16 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      // Reasoning is already extracted by middleware - use result directly
+      const text = raw.trim();
 
       logger.info(
         {
           agent: agent.name,
           chatJid,
           sentResponseCount,
-          rawOutputLength: raw.length,
-          cleanedOutputLength: text.length,
-          rawPreview: raw.slice(0, 200),
+          outputLength: raw.length,
+          outputPreview: raw.slice(0, 200),
         },
         'Agent streaming output received',
       );

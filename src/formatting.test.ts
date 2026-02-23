@@ -5,7 +5,7 @@ import {
   escapeXml,
   formatMessages,
   formatOutbound,
-  stripInternalTags,
+  stripReasoningTags,
 } from './router.js';
 import { NewMessage } from './types.js';
 
@@ -69,7 +69,12 @@ describe('formatMessages', () => {
 
   it('formats multiple messages', () => {
     const msgs = [
-      makeMsg({ id: '1', sender_name: 'Alice', content: 'hi', timestamp: 't1' }),
+      makeMsg({
+        id: '1',
+        sender_name: 'Alice',
+        content: 'hi',
+        timestamp: 't1',
+      }),
       makeMsg({ id: '2', sender_name: 'Bob', content: 'hey', timestamp: 't2' }),
     ];
     const result = formatMessages(msgs);
@@ -133,46 +138,48 @@ describe('TRIGGER_PATTERN', () => {
   });
 });
 
-// --- Outbound formatting (internal tag stripping + prefix) ---
+// --- Outbound formatting (reasoning tag stripping + prefix) ---
 
-describe('stripInternalTags', () => {
-  it('strips single-line internal tags', () => {
-    expect(stripInternalTags('hello <internal>secret</internal> world')).toBe(
-      'hello  world',
-    );
-  });
-
-  it('strips multi-line internal tags', () => {
+describe('stripReasoningTags', () => {
+  it('strips single-line reasoning tags', () => {
     expect(
-      stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world'),
+      stripReasoningTags('hello <reasoning>secret</reasoning> world'),
     ).toBe('hello  world');
   });
 
-  it('strips multiple internal tag blocks', () => {
+  it('strips multi-line reasoning tags', () => {
     expect(
-      stripInternalTags(
-        '<internal>a</internal>hello<internal>b</internal>',
+      stripReasoningTags(
+        'hello <reasoning>\nsecret\nstuff\n</reasoning> world',
+      ),
+    ).toBe('hello  world');
+  });
+
+  it('strips multiple reasoning tag blocks', () => {
+    expect(
+      stripReasoningTags(
+        '<reasoning>a</reasoning>hello<reasoning>b</reasoning>',
       ),
     ).toBe('hello');
   });
 
-  it('returns empty string when text is only internal tags', () => {
-    expect(stripInternalTags('<internal>only this</internal>')).toBe('');
+  it('returns empty string when text is only reasoning tags', () => {
+    expect(stripReasoningTags('<reasoning>only this</reasoning>')).toBe('');
   });
 });
 
 describe('formatOutbound', () => {
-  it('returns text with internal tags stripped', () => {
+  it('returns text with reasoning tags stripped', () => {
     expect(formatOutbound('hello world')).toBe('hello world');
   });
 
-  it('returns empty string when all text is internal', () => {
-    expect(formatOutbound('<internal>hidden</internal>')).toBe('');
+  it('returns empty string when all text is reasoning', () => {
+    expect(formatOutbound('<reasoning>hidden</reasoning>')).toBe('');
   });
 
-  it('strips internal tags from remaining text', () => {
+  it('strips reasoning tags from remaining text', () => {
     expect(
-      formatOutbound('<internal>thinking</internal>The answer is 42'),
+      formatOutbound('<reasoning>thinking</reasoning>The answer is 42'),
     ).toBe('The answer is 42');
   });
 });
