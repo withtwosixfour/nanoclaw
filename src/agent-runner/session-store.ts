@@ -52,6 +52,21 @@ export function clearSession(jid: string): void {
       throw err;
     }
   }
+
+  // Also clear the conversation history from the database
+  const dbPath = getSessionDbPath(jid);
+  if (fs.existsSync(dbPath)) {
+    try {
+      fs.unlinkSync(dbPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+    }
+  }
+
+  // Remove from the dbs cache so a new connection will be created
+  dbs.delete(jid);
 }
 
 export function getOrCreateSessionId(jid: string, agentId: string): string {

@@ -91,17 +91,88 @@ function readSecrets(): AgentSecrets {
   ]);
 }
 
+// File watching cache for CLAUDE.md files
+interface FileCache {
+  content: string;
+  mtime: number;
+  watcher?: fs.FSWatcher;
+}
+
+const fileCache = new Map<string, FileCache>();
+
+function getCachedFileContent(filePath: string): string | null {
+  if (!fs.existsSync(filePath)) {
+    // Clean up watcher if file no longer exists
+    const cached = fileCache.get(filePath);
+    if (cached?.watcher) {
+      cached.watcher.close();
+    }
+    fileCache.delete(filePath);
+    return null;
+  }
+
+  const stats = fs.statSync(filePath);
+  const cached = fileCache.get(filePath);
+
+  // If we have a cached version and the file hasn't changed, return it
+  if (cached && cached.mtime === stats.mtimeMs) {
+    return cached.content;
+  }
+
+  // File has changed or not cached, read and cache it
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    // Set up file watcher if not already watching
+    if (!cached?.watcher) {
+      const watcher = fs.watch(filePath, (eventType) => {
+        if (eventType === 'change') {
+          logger.debug({ filePath }, 'CLAUDE.md file changed, clearing cache');
+          // Remove from cache so it will be re-read on next access
+          const entry = fileCache.get(filePath);
+          if (entry?.watcher) {
+            entry.watcher.close();
+          }
+          fileCache.delete(filePath);
+        }
+      });
+
+      fileCache.set(filePath, {
+        content,
+        mtime: stats.mtimeMs,
+        watcher,
+      });
+    } else {
+      // Update cache with new content and mtime
+      fileCache.set(filePath, {
+        content,
+        mtime: stats.mtimeMs,
+        watcher: cached.watcher,
+      });
+    }
+
+    return content;
+  } catch (err) {
+    logger.error({ filePath, err }, 'Failed to read CLAUDE.md file');
+    return null;
+  }
+}
+
 function buildSystemPrompt(agentId: string, isMain: boolean): string {
   const agentClaude = path.join(AGENTS_DIR, agentId, 'CLAUDE.md');
   const globalClaude = path.join(AGENTS_DIR, 'global', 'CLAUDE.md');
   const parts: string[] = [];
 
-  if (fs.existsSync(agentClaude)) {
-    parts.push(fs.readFileSync(agentClaude, 'utf-8').trim());
+  const agentContent = getCachedFileContent(agentClaude);
+  if (agentContent) {
+    parts.push(agentContent.trim());
   }
 
-  if (!isMain && fs.existsSync(globalClaude)) {
-    parts.push(fs.readFileSync(globalClaude, 'utf-8').trim());
+  if (!isMain) {
+    const globalContent = getCachedFileContent(globalClaude);
+    if (globalContent) {
+      parts.push(globalContent.trim());
+    }
   }
 
   return parts.filter(Boolean).join('\n\n');
