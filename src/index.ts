@@ -599,11 +599,11 @@ function recoverPendingMessages(): void {
 }
 
 async function main(): Promise<void> {
-  // Run migration first (renames groups/ to agents/, moves .nanoclaw/ to sessions/)
-  await runMigration();
-
   initDatabase();
   logger.info('Database initialized');
+
+  // Run migration after DB is ready (renames groups/ to agents/, moves .nanoclaw/ to sessions/)
+  await runMigration();
 
   // Load routes from database into memory
   const dbRoutes = getAllRoutes();
