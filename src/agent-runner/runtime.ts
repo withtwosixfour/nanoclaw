@@ -215,6 +215,17 @@ async function runQuery(
     responseMessages = [{ role: 'assistant', content: responseText }];
   }
 
+  // Extract final assistant response from messages if responseText is empty
+  // This happens when tools are used - the content is in messages, not text stream
+  if (!responseText && responseMessages.length > 0) {
+    const lastAssistant = responseMessages
+      .filter((m) => m.role === 'assistant')
+      .pop();
+    if (lastAssistant) {
+      responseText = extractContentText(lastAssistant) || '';
+    }
+  }
+
   saveMessage(
     input.chatJid,
     sessionId,
