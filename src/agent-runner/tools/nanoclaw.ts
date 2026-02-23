@@ -294,5 +294,18 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         };
       },
     }),
+    list_agents: tool({
+      description: 'List all registered agents.',
+      inputSchema: z.object({}).optional(),
+      execute: async () => {
+        const agents = deps.getRegisteredAgents();
+        const agentList = Object.values(agents)
+          .map((a) => `- ${a.id}: ${a.name} (trigger: ${a.trigger})`)
+          .join('\n');
+        return {
+          message: agentList || 'No agents registered.',
+        };
+      },
+    }),
   };
 }
