@@ -328,6 +328,7 @@ function ensureSessionForJid(chatJid: string): void {
  * Called by the GroupQueue when it's this JID's turn.
  */
 async function processJidMessages(chatJid: string): Promise<boolean> {
+  const processStart = Date.now();
   const agent = resolveAgentForJid(chatJid);
   if (!agent) return true;
 
@@ -390,8 +391,17 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  let streamCallbackCount = 0;
+
+  logger.debug(
+    { agent: agent.name, chatJid, promptLength: prompt.length },
+    'Calling runAgent with streaming callback',
+  );
 
   const output = await runAgent(agent, prompt, chatJid, async (result) => {
+    streamCallbackCount++;
+    const callbackStart = Date.now();
+
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -400,10 +410,38 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ agent: agent.name }, `Agent output: ${raw.slice(0, 200)}`);
+
+      logger.info(
+        {
+          agent: agent.name,
+          chatJid,
+          streamCallbackCount,
+          rawOutputLength: raw.length,
+          cleanedOutputLength: text.length,
+          rawPreview: raw.slice(0, 200),
+        },
+        'Agent streaming output received',
+      );
+
       if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+        try {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+          logger.debug(
+            { agent: agent.name, chatJid, messageLength: text.length },
+            'Message sent to channel',
+          );
+        } catch (sendErr) {
+          logger.error(
+            {
+              agent: agent.name,
+              chatJid,
+              error:
+                sendErr instanceof Error ? sendErr.message : String(sendErr),
+            },
+            'Failed to send message to channel',
+          );
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -411,18 +449,54 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
 
     if (result.status === 'error') {
       hadError = true;
+      logger.error(
+        {
+          agent: agent.name,
+          chatJid,
+          streamCallbackCount,
+          error: result.error,
+        },
+        'Agent reported error in stream callback',
+      );
     }
+
+    if (result.newSessionId) {
+      logger.debug(
+        { agent: agent.name, chatJid, newSessionId: result.newSessionId },
+        'Session ID updated in stream callback',
+      );
+    }
+
+    logger.debug(
+      {
+        agent: agent.name,
+        chatJid,
+        streamCallbackCount,
+        durationMs: Date.now() - callbackStart,
+      },
+      'Stream callback completed',
+    );
   });
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  const processingDuration = Date.now() - processStart;
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
       logger.warn(
-        { agent: agent.name },
+        {
+          agent: agent.name,
+          chatJid,
+          output,
+          hadError,
+          outputSentToUser,
+          streamCallbackCount,
+          processingDurationMs: processingDuration,
+        },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
       return true;
@@ -431,11 +505,30 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn(
-      { agent: agent.name },
+      {
+        agent: agent.name,
+        chatJid,
+        output,
+        hadError,
+        rolledBackTo: previousCursor,
+        processingDurationMs: processingDuration,
+      },
       'Agent error, rolled back message cursor for retry',
     );
     return false;
   }
+
+  logger.info(
+    {
+      agent: agent.name,
+      chatJid,
+      output,
+      outputSentToUser,
+      streamCallbackCount,
+      processingDurationMs: processingDuration,
+    },
+    'Message processing completed successfully',
+  );
 
   return true;
 }
@@ -446,7 +539,23 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: AgentOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
+  const runStart = Date.now();
   const isMain = agent.id === MAIN_AGENT_ID;
+
+  logger.info(
+    {
+      agent: agent.name,
+      agentId: agent.id,
+      chatJid,
+      isMain,
+      promptLength: prompt.length,
+      modelProvider: agent.modelProvider,
+      modelName: agent.modelName,
+      existingSession: sessions[chatJid] || null,
+    },
+    'runAgent starting',
+  );
+
   // Get or create session for this JID
   const sessionId =
     sessions[chatJid] || getOrCreateSessionId(chatJid, agent.id);
@@ -454,9 +563,18 @@ async function runAgent(
   if (!sessions[chatJid]) {
     sessions[chatJid] = sessionId;
     setSession(chatJid, agent.id, sessionId);
+    logger.debug(
+      { agent: agent.name, chatJid, sessionId },
+      'Created and saved new session',
+    );
   }
 
   try {
+    logger.debug(
+      { agent: agent.name, chatJid, sessionId },
+      'Calling runAgentInput',
+    );
+
     const output = await runAgentInput(
       {
         prompt,
@@ -470,19 +588,64 @@ async function runAgent(
       onOutput,
     );
 
+    const runDuration = Date.now() - runStart;
+
     if (output.newSessionId) {
       sessions[chatJid] = output.newSessionId;
       setSession(chatJid, agent.id, output.newSessionId);
+      logger.debug(
+        {
+          agent: agent.name,
+          chatJid,
+          oldSessionId: sessionId,
+          newSessionId: output.newSessionId,
+        },
+        'Session ID updated after run',
+      );
     }
 
     if (output.status === 'error') {
-      logger.error({ agent: agent.name, error: output.error }, 'Agent error');
+      logger.error(
+        {
+          agent: agent.name,
+          chatJid,
+          sessionId,
+          error: output.error,
+          durationMs: runDuration,
+        },
+        'runAgent completed with error',
+      );
       return 'error';
     }
 
+    logger.info(
+      {
+        agent: agent.name,
+        chatJid,
+        sessionId,
+        status: output.status,
+        hasResult: !!output.result,
+        resultLength: output.result?.length || 0,
+        durationMs: runDuration,
+      },
+      'runAgent completed successfully',
+    );
+
     return 'success';
   } catch (err) {
-    logger.error({ agent: agent.name, err }, 'Agent error');
+    const runDuration = Date.now() - runStart;
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error(
+      {
+        agent: agent.name,
+        chatJid,
+        sessionId,
+        error: error.message,
+        stack: error.stack,
+        durationMs: runDuration,
+      },
+      'runAgent threw exception',
+    );
     return 'error';
   }
 }
