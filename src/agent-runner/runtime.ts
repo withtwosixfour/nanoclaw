@@ -589,6 +589,11 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       prompt += '\n' + pending.join('\n');
     }
 
+    // Track the last response - only send the final one at the end
+    let lastResponse: string | null = null;
+    let hadError = false;
+    let errorMessage = '';
+
     try {
       while (true) {
         logger.debug(
@@ -605,22 +610,12 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         );
         sessionId = newSessionId;
 
-        const output: AgentOutput = {
-          status: 'success',
-          result: responseText || null,
-          newSessionId: sessionId,
-        };
-        if (onOutput) await onOutput(output);
+        // Store this response (will be overwritten if more piped messages arrive)
+        if (responseText) {
+          lastResponse = responseText;
+        }
 
         void maybeCompactSession(input, sessionId, usageTokens, secrets);
-
-        if (onOutput) {
-          await onOutput({
-            status: 'success',
-            result: null,
-            newSessionId: sessionId,
-          });
-        }
 
         const nextMessage = await waitForPipeMessage(pipe);
         if (nextMessage === null) {
@@ -633,29 +628,56 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         prompt = nextMessage;
       }
 
+      // Send only the final response once at the end
+      if (onOutput) {
+        await onOutput({
+          status: 'success',
+          result: lastResponse,
+          newSessionId: sessionId,
+        });
+        // Send completion marker
+        await onOutput({
+          status: 'success',
+          result: null,
+          newSessionId: sessionId,
+        });
+      }
+
       return {
         status: 'success',
-        result: null,
+        result: lastResponse,
         newSessionId: sessionId,
       };
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      errorMessage = err instanceof Error ? err.message : String(err);
+      hadError = true;
       logger.error(
         { agent: input.agentId, error: errorMessage },
         'Agent error',
       );
+    } finally {
+      activeRuns.delete(input.chatJid);
+      closePipe(pipe);
+    }
+
+    // Handle error case - send the last response we got before the error
+    if (hadError) {
       const output: AgentOutput = {
         status: 'error',
-        result: null,
+        result: lastResponse,
         newSessionId: sessionId,
         error: errorMessage,
       };
       if (onOutput) await onOutput(output);
       return output;
-    } finally {
-      activeRuns.delete(input.chatJid);
-      closePipe(pipe);
     }
+
+    // This line is unreachable but satisfies TypeScript
+    return {
+      status: 'success',
+      result: null,
+      newSessionId: sessionId,
+    };
   };
 
   return { run, pipeMessage, close };
