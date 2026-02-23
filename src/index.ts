@@ -390,9 +390,11 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // Track the final response to send at the end
+  let finalResponseText = '';
 
   const output = await runAgent(agent, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
+    // Streaming output callback — track the latest response but don't send yet
     if (result.result) {
       const raw =
         typeof result.result === 'string'
@@ -401,9 +403,9 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ agent: agent.name }, `Agent output: ${raw.slice(0, 200)}`);
+      // Store as the final response (overwrites previous steps)
       if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+        finalResponseText = text;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -413,6 +415,12 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
       hadError = true;
     }
   });
+
+  // Send only the final response after the agent run completes
+  if (finalResponseText) {
+    await channel.sendMessage(chatJid, finalResponseText);
+    outputSentToUser = true;
+  }
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);

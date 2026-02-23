@@ -56,6 +56,8 @@ export class DiscordChannel implements Channel {
     string,
     { messageId: string; timeout: NodeJS.Timeout }
   > = new Map();
+  // Track typing intervals per channel to keep typing indicator alive
+  private typingIntervals: Map<string, NodeJS.Timeout> = new Map();
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -428,6 +430,12 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
   }
 
   async disconnect(): Promise<void> {
+    // Clear all typing intervals before disconnect
+    for (const interval of this.typingIntervals.values()) {
+      clearInterval(interval);
+    }
+    this.typingIntervals.clear();
+
     if (this.client) {
       this.client.destroy();
       this.client = null;
@@ -436,7 +444,18 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.client || !isTyping) return;
+    if (!this.client) return;
+
+    // Clear existing interval if any
+    const existingInterval = this.typingIntervals.get(jid);
+    if (existingInterval) {
+      clearInterval(existingInterval);
+      this.typingIntervals.delete(jid);
+    }
+
+    if (!isTyping) return;
+
+    // Send initial typing indicator
     try {
       const channelId = jid.replace(/^dc:/, '');
       const channel = await this.client.channels.fetch(channelId);
@@ -445,6 +464,25 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
       }
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Discord typing indicator');
+      return;
     }
+
+    // Set up interval to keep typing alive (Discord typing expires after ~10 seconds)
+    const interval = setInterval(async () => {
+      try {
+        const channelId = jid.replace(/^dc:/, '');
+        const channel = await this.client?.channels.fetch(channelId);
+        if (channel && 'sendTyping' in channel) {
+          await (channel as TextChannel).sendTyping();
+        }
+      } catch (err) {
+        logger.debug(
+          { jid, err },
+          'Failed to maintain Discord typing indicator',
+        );
+      }
+    }, 8000); // Refresh every 8 seconds
+
+    this.typingIntervals.set(jid, interval);
   }
 }
