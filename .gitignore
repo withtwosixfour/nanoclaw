@@ -18,6 +18,23 @@ groups/global/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
 
+# agents - only track base structure and specific CLAUDE.md files
+agents/*
+!agents/main/
+!agents/global/
+agents/main/*
+agents/global/*
+!agents/global/CLAUDE.md
+
+# sessions - only track base structure and specific CLAUDE.md files
+sessions/*
+!sessions/main/
+!sessions/global/
+sessions/main/*
+sessions/global/*
+!sessions/main/CLAUDE.md
+!sessions/global/CLAUDE.md
+
 # Secrets
 *.keys.json
 .env
