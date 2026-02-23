@@ -100,7 +100,7 @@ async function runTask(
       async (streamedOutput: AgentOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
+          // Forward result to user (middleware extracts reasoning; sendMessage is safety net)
           await deps.sendMessage(task.chat_jid, streamedOutput.result);
           // Only reset idle timer on actual results, not session-update markers
           resetIdleTimer();
