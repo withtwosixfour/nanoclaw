@@ -71,9 +71,10 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     
-    -- Routes table for persistent JID-to-agent mapping
+    -- Routes table for persistent thread-to-agent mapping
+    -- Supports both legacy JID format and Chat SDK thread ID format
     CREATE TABLE IF NOT EXISTS routes (
-      jid TEXT PRIMARY KEY,
+      thread_id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (agent_id) REFERENCES agents(id)
@@ -225,6 +226,20 @@ function createSchema(database: Database.Database): void {
     `);
   } catch {
     /* column already exists or no rows to migrate */
+  }
+
+  // Migration: Add thread_id column to routes for Chat SDK format
+  try {
+    database.exec(`ALTER TABLE routes ADD COLUMN thread_id TEXT`);
+
+    // For existing routes with dc: JIDs, add thread_id in new format
+    database.exec(`
+      UPDATE routes 
+      SET thread_id = 'discord::' || substr(jid, 4)
+      WHERE jid LIKE 'dc:%' AND thread_id IS NULL
+    `);
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -738,24 +753,26 @@ export function getRoute(jid: string): string | undefined {
   return row?.agent_id;
 }
 
-export function setRoute(jid: string, agentId: string): void {
+export function setRoute(threadId: string, agentId: string): void {
   db.prepare(
-    'INSERT OR REPLACE INTO routes (jid, agent_id, created_at) VALUES (?, ?, ?)',
-  ).run(jid, agentId, new Date().toISOString());
+    'INSERT OR REPLACE INTO routes (thread_id, agent_id, created_at) VALUES (?, ?, ?)',
+  ).run(threadId, agentId, new Date().toISOString());
 }
 
-export function deleteRoute(jid: string): void {
-  db.prepare('DELETE FROM routes WHERE jid = ?').run(jid);
+export function deleteRoute(threadId: string): void {
+  db.prepare('DELETE FROM routes WHERE thread_id = ?').run(threadId);
 }
 
 export function getAllRoutes(): Record<string, string> {
-  const rows = db.prepare('SELECT jid, agent_id FROM routes').all() as Array<{
-    jid: string;
+  const rows = db
+    .prepare('SELECT thread_id, agent_id FROM routes')
+    .all() as Array<{
+    thread_id: string;
     agent_id: string;
   }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
-    result[row.jid] = row.agent_id;
+    result[row.thread_id] = row.agent_id;
   }
   return result;
 }
