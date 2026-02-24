@@ -16,7 +16,6 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { logger } from '../logger.js';
 import { resolveAgentId } from '../router.js';
 import { saveAttachment, buildMediaNote } from '../attachments/store.js';
-import { storeAttachment } from '../db.js';
 import type { Attachment } from '../types.js';
 import {
   Channel,
@@ -377,12 +376,8 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
       // Add acknowledgement reaction to show we're processing
       await this.addAcknowledgement(chatJid, message);
 
-      // Store attachment metadata in DB
-      for (const att of attachments) {
-        storeAttachment(att, msgId, chatJid);
-      }
-
       // Deliver message — startMessageLoop() will pick it up
+      // Note: Attachment metadata is stored by the onMessage handler in index.ts
       logger.info(
         { chatJid, chatName, sender: senderName, agentId, messageId: msgId },
         'Dispatching inbound message',
