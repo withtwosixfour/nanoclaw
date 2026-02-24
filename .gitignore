@@ -49,4 +49,7 @@ sessions/global/*
 # Skills system (local per-installation state)
 .nanoclaw/
 
+# Chat SDK reference (cloned for development)
+chat-sdk/
+
 agents-sdk-docs
