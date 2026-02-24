@@ -30,7 +30,8 @@ export interface DiscordChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
   executeCommand: (
     chatJid: string,
-    command: 'clear' | 'status' | string,
+    command: 'clear' | 'status' | 'update' | string,
+    sender?: string,
   ) => Promise<string>;
 }
 
@@ -47,7 +48,18 @@ const CHATID_COMMAND = new SlashCommandBuilder()
   .setName('chatid')
   .setDescription('Get the Discord channel ID for routing configuration');
 
-const COMMANDS = [CLEAR_COMMAND, STATUS_COMMAND, CHATID_COMMAND];
+const UPDATE_COMMAND = new SlashCommandBuilder()
+  .setName('update')
+  .setDescription(
+    'Update the bot by pulling latest code, installing deps, and restarting',
+  );
+
+const COMMANDS = [
+  CLEAR_COMMAND,
+  STATUS_COMMAND,
+  CHATID_COMMAND,
+  UPDATE_COMMAND,
+];
 
 export class DiscordChannel implements Channel {
   name = 'discord';
@@ -177,12 +189,21 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
         return;
       }
 
-      // For clear and status, use the existing command execution logic
-      if (commandName === 'clear' || commandName === 'status') {
+      // For clear, status, and update, use the existing command execution logic
+      if (
+        commandName === 'clear' ||
+        commandName === 'status' ||
+        commandName === 'update'
+      ) {
         // Defer reply since command execution might take a moment
         await interaction.deferReply({ ephemeral: true });
 
-        const response = await this.opts.executeCommand(chatJid, commandName);
+        const senderId = `discord:${interaction.user.id}`;
+        const response = await this.opts.executeCommand(
+          chatJid,
+          commandName,
+          senderId,
+        );
 
         await interaction.editReply({
           content: response,

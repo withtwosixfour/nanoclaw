@@ -10,6 +10,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'DISCORD_BOT_TOKEN',
   'DISCORD_ONLY',
+  'ADMIN_USER_IDS',
 ]);
 
 export const ASSISTANT_NAME =
@@ -56,3 +57,14 @@ export const DISCORD_BOT_TOKEN =
   process.env.DISCORD_BOT_TOKEN || envConfig.DISCORD_BOT_TOKEN || '';
 export const DISCORD_ONLY =
   (process.env.DISCORD_ONLY || envConfig.DISCORD_ONLY) === 'true';
+
+// Comma-separated list of authorized user IDs who can trigger /update command
+// Format: 1234567890@s.whatsapp.net,discord:123456789012345678
+export const ADMIN_USER_IDS = (
+  process.env.ADMIN_USER_IDS ||
+  envConfig.ADMIN_USER_IDS ||
+  ''
+)
+  .split(',')
+  .map((id) => id.trim())
+  .filter((id) => id.length > 0);

@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { getMimeTypeFromExtension } from './attachments/images.js';
 import {
   ASSISTANT_NAME,
+  ADMIN_USER_IDS,
   DATA_DIR,
   DISCORD_BOT_TOKEN,
   DISCORD_ONLY,
@@ -138,7 +139,7 @@ function saveState(): void {
   );
 }
 
-type CommandType = 'clear' | 'status';
+type CommandType = 'clear' | 'status' | 'update';
 
 function parseCommand(text: string): CommandType | null {
   const trimmed = text.trim();
@@ -146,6 +147,7 @@ function parseCommand(text: string): CommandType | null {
   const normalized = trimmed.toLowerCase();
   if (normalized === '/clear') return 'clear';
   if (normalized === '/status') return 'status';
+  if (normalized === '/update') return 'update';
   return null;
 }
 
@@ -177,6 +179,7 @@ function splitCommandMessages(
 export async function executeCommand(
   chatJid: string,
   command: CommandType | string,
+  sender?: string,
 ): Promise<string> {
   const agent = resolveAgentForJid(chatJid);
   if (!agent) {
@@ -199,6 +202,72 @@ export async function executeCommand(
     const tokenCount = getSessionTokenCount(chatJid, sessionId);
     const lastTs = getSessionLastTimestamp(chatJid, sessionId) || 'none';
     return `Status: agent=${agent.id} session=${sessionId} model=${modelProvider}/${modelName} messages=${messageCount} tokens=${tokenCount} last=${lastTs}`;
+  } else if (command === 'update') {
+    // Authorization check: only allow if sender is in ADMIN_USER_IDS or if no admins are configured
+    const normalizedSender = sender || '';
+    const isAuthorized =
+      ADMIN_USER_IDS.length === 0 ||
+      ADMIN_USER_IDS.some((id) => normalizedSender === id);
+
+    if (!isAuthorized) {
+      logger.warn(
+        { sender, chatJid },
+        'Unauthorized /update command attempt blocked',
+      );
+      return 'Unauthorized. Only administrators can trigger updates.';
+    }
+
+    // Write pending update state file with timestamp for race condition prevention
+    const pendingPath = path.join(DATA_DIR, 'update-pending.json');
+    const updateStartTime = Date.now();
+    fs.writeFileSync(
+      pendingPath,
+      JSON.stringify(
+        {
+          chatJid,
+          timestamp: new Date().toISOString(),
+          updateStartTime,
+          sender: normalizedSender,
+        },
+        null,
+        2,
+      ),
+    );
+
+    // Spawn detached process to run npm update
+    const { spawn } = await import('child_process');
+    const logPath = path.join(DATA_DIR, 'update.log');
+    const logStream = fs.openSync(logPath, 'a');
+
+    const child = spawn('npm', ['run', 'update'], {
+      detached: true,
+      stdio: ['ignore', logStream, logStream],
+      cwd: process.cwd(),
+    });
+
+    // Add error handling for spawn failures
+    child.on('error', (err) => {
+      logger.error({ err }, 'Failed to spawn update process');
+      // Clean up the pending file on spawn error
+      try {
+        fs.unlinkSync(pendingPath);
+      } catch {}
+    });
+
+    // Handle process exit to catch execution failures
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        logger.error({ exitCode: code }, 'Update process failed');
+        // Clean up pending file on failure
+        try {
+          fs.unlinkSync(pendingPath);
+        } catch {}
+      }
+    });
+
+    child.unref();
+
+    return 'Update in progress... The bot will restart shortly.';
   }
 
   return 'Unknown command.';
@@ -213,7 +282,7 @@ async function handleCommandMessages(
   if (commands.length === 0) return;
 
   for (const { message, command } of commands) {
-    const response = await executeCommand(chatJid, command);
+    const response = await executeCommand(chatJid, command, message.sender);
     await channel.sendMessage(chatJid, response);
 
     if (
@@ -962,6 +1031,46 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn(processJidMessages);
   recoverPendingMessages();
   startMessageLoop();
+
+  // Check for pending update completion (with timestamp validation to prevent race conditions)
+  const pendingUpdatePath = path.join(DATA_DIR, 'update-pending.json');
+  if (fs.existsSync(pendingUpdatePath)) {
+    try {
+      const pending = JSON.parse(fs.readFileSync(pendingUpdatePath, 'utf8'));
+
+      // Validate that the update was started recently (within 10 minutes)
+      // This prevents sending success messages for old failed updates
+      const updateStartTime = pending.updateStartTime || 0;
+      const timeSinceUpdate = Date.now() - updateStartTime;
+      const TEN_MINUTES = 10 * 60 * 1000;
+
+      if (timeSinceUpdate > TEN_MINUTES) {
+        logger.warn(
+          { chatJid: pending.chatJid, timeSinceUpdateMs: timeSinceUpdate },
+          'Stale update pending file detected, skipping completion message',
+        );
+      } else {
+        const channel = findChannel(channels, pending.chatJid);
+        if (channel) {
+          await channel.sendMessage(
+            pending.chatJid,
+            '✅ Update finished and bot restarted successfully.',
+          );
+          logger.info(
+            { chatJid: pending.chatJid },
+            'Sent update completion message',
+          );
+        }
+      }
+      fs.unlinkSync(pendingUpdatePath);
+    } catch (err) {
+      logger.error({ err }, 'Failed to handle pending update notification');
+      // Clean up the file even on error
+      try {
+        fs.unlinkSync(pendingUpdatePath);
+      } catch {}
+    }
+  }
 }
 
 // Guard: only run when executed directly, not when imported by tests
