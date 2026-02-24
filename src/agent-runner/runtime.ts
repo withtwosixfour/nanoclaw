@@ -26,7 +26,10 @@ import {
   saveMessage,
 } from './session-store.js';
 import { getRouteInfo } from '../router.js';
-import { detectAndLoadImages } from '../attachments/images.js';
+import {
+  detectAndLoadImages,
+  extractImagePathsFromMediaNotes,
+} from '../attachments/images.js';
 
 const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
 const DEFAULT_MODEL_NAME = 'kimi-k2.5';
@@ -640,6 +643,18 @@ async function maybeCompactSessionPreflight(
   const estimatedTokens =
     estimateTokenCount(messages) + Math.ceil(promptText.length / 4);
 
+  // Estimate image tokens if vision model and images in prompt
+  let estimatedImageTokens = 0;
+  let imagePathCount = 0;
+  if (config.supportsVision) {
+    imagePathCount = extractImagePathsFromMediaNotes(promptText).length;
+    // Vision models typically use ~1000-2000 tokens per image depending on size
+    // Base64 encoding adds ~33% overhead, and each base64 char is ~0.75 tokens
+    estimatedImageTokens = imagePathCount * 1500; // Conservative estimate
+  }
+
+  const totalEstimatedTokens = estimatedTokens + estimatedImageTokens;
+
   logger.debug(
     {
       agent: input.agentId,
@@ -650,16 +665,19 @@ async function maybeCompactSessionPreflight(
       threshold,
       thresholdPercent: config.compactionThresholdPercent,
       estimatedTokens,
+      estimatedImageTokens,
+      totalEstimatedTokens,
       promptTokens: Math.ceil(promptText.length / 4),
-      tokensToThreshold: Math.max(0, threshold - estimatedTokens),
-      percentOfThreshold: Math.floor((estimatedTokens / threshold) * 100),
-      willCompact: estimatedTokens >= threshold,
+      tokensToThreshold: Math.max(0, threshold - totalEstimatedTokens),
+      percentOfThreshold: Math.floor((totalEstimatedTokens / threshold) * 100),
+      willCompact: totalEstimatedTokens >= threshold,
       messageCount: messages.length,
+      imageCount: imagePathCount,
     },
     'Compaction check (pre-flight)',
   );
 
-  if (estimatedTokens < threshold) return;
+  if (totalEstimatedTokens < threshold) return;
 
   activeCompactions.add(sessionId);
   await compactSession(input, sessionId, secrets);
