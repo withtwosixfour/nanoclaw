@@ -12,7 +12,7 @@ import {
   setRoute,
 } from '../../db.js';
 import { Agent } from '../../types.js';
-import { resolveAgentId, setRouteInMemory } from '../../router.js';
+import { resolveAgentId, setRouteInMemory, isNoReply } from '../../router.js';
 
 export interface NanoClawContext {
   chatJid: string;
@@ -139,6 +139,9 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         sender: z.string().optional().describe('Optional sender identity'),
       }),
       execute: async (input: { text: string; sender?: string }) => {
+        if (isNoReply(input.text)) {
+          return { ok: true, message: 'Message suppressed (NO_REPLY).' };
+        }
         await deps.sendMessage(ctx.chatJid, input.text, input.sender);
         return { ok: true, message: 'Message sent.' };
       },

@@ -19,6 +19,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { Agent, ScheduledTask } from './types.js';
+import { isNoReply } from './router.js';
 
 export interface SchedulerDependencies {
   agents: () => Record<string, Agent>;
@@ -100,8 +101,10 @@ async function runTask(
       async (streamedOutput: AgentOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (middleware extracts reasoning; sendMessage is safety net)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          // Forward result to user unless it's a NO_REPLY marker
+          if (!isNoReply(streamedOutput.result)) {
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           // Only reset idle timer on actual results, not session-update markers
           resetIdleTimer();
         }

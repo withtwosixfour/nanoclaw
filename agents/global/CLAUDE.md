@@ -19,6 +19,20 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+## Silent Responses (NO_REPLY)
+
+When you don't need to send a visible response to the user, output exactly:
+
+NO_REPLY
+
+This will suppress any message from being sent. Useful for:
+
+- Silent background operations
+- When the work is self-evident (file created, task scheduled)
+- Housekeeping tasks with no user-facing result
+
+The output must be ONLY "NO_REPLY" (whitespace is trimmed). This works for both regular conversations and scheduled tasks.
+
 ## Sending Attachments
 
 You can send files to the chat using the `SendAttachment` tool:

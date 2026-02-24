@@ -48,6 +48,7 @@ import {
   loadRoutesFromDb,
   getRouteJids,
   getSessionPath,
+  isNoReply,
 } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Agent, Attachment, Channel, NewMessage } from './types.js';
@@ -489,7 +490,7 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
         'Agent streaming output received',
       );
 
-      if (text) {
+      if (text && !isNoReply(text)) {
         try {
           await channel.sendMessage(chatJid, text);
           sentResponseCount += 1;
