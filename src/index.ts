@@ -2,9 +2,14 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
-import { createChatSdkBot, agents, sessions } from './chat-sdk-bot.js';
+import {
+  createChatSdkBot,
+  agents,
+  sessions,
+  sendMessageToJid,
+} from './chat-sdk-bot.js';
 import { logger } from './logger.js';
-import { findChannel, formatOutbound } from './router.js';
+import { formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { GroupQueue } from './group-queue.js';
 import {
@@ -12,19 +17,10 @@ import {
   AgentInput,
   createAgentRuntime,
 } from './agent-runner/runtime.js';
-import {
-  getOrCreateSessionId,
-  clearSession,
-} from './agent-runner/session-store.js';
-import { deleteSession } from './db.js';
-import type { Agent } from './types.js';
+import { getOrCreateSessionId } from './agent-runner/session-store.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
-
-// Legacy exports for compatibility
-let lastAgentTimestamp: Record<string, string> = {};
-let lastCommandTimestamp: Record<string, string> = {};
 
 // Create a minimal queue for scheduled tasks
 const queue = new GroupQueue();
@@ -32,12 +28,11 @@ const queue = new GroupQueue();
 // Create agent runtime that sends messages via Chat SDK
 const agentRuntime = createAgentRuntime({
   sendMessage: async (jid, text) => {
-    // This is called by tools - in the new architecture, we don't have direct channel access
-    // Instead, we should pass the thread through the context
-    logger.warn(
-      { jid, text: text.slice(0, 50) },
-      'Tool sendMessage called - needs thread context',
-    );
+    try {
+      await sendMessageToJid(jid, text);
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send message from agent runtime');
+    }
   },
   registerAgent: () => {},
   getRegisteredAgents: () => agents,
@@ -78,35 +73,31 @@ async function main(): Promise<void> {
     getSessions: () => sessions,
     queue,
     runAgent: async (input: AgentInput) => {
-      // For scheduled tasks, we need to handle differently
-      // They won't have a thread context, so we need to queue them
-      logger.info(
-        { agentId: input.agentId, chatJid: input.chatJid },
-        'Scheduled task requested',
-      );
-
-      // Store the task for when a message comes in
-      // This is a simplified approach - scheduled tasks will be picked up when someone messages
-      return {
-        status: 'success' as const,
-        result: null,
-        newSessionId:
-          input.sessionId || getOrCreateSessionId(input.chatJid, input.agentId),
-      };
+      // Run the agent and stream results
+      return new Promise((resolve) => {
+        agentRuntime.run(input, async (output: AgentOutput) => {
+          if (output.status === 'success' || output.status === 'error') {
+            resolve({
+              status: output.status,
+              result: output.result,
+              newSessionId: output.newSessionId || input.sessionId,
+            });
+          }
+        });
+      });
     },
     sendMessage: async (jid, rawText) => {
       const text = formatOutbound(rawText);
       if (!text) return;
 
-      // Find the thread and send message
-      const threadId = jid.replace(/^dc:/, '');
-      logger.info(
-        { threadId, text: text.slice(0, 50) },
-        'Scheduled message send',
-      );
-
-      // Note: In the new architecture, we need to look up the thread from bot state
-      // This is simplified - actual implementation would need to track thread references
+      try {
+        await sendMessageToJid(jid, text);
+      } catch (err) {
+        logger.error(
+          { jid, err, text: text.slice(0, 50) },
+          'Failed to send scheduled message',
+        );
+      }
     },
   });
 

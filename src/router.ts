@@ -30,13 +30,32 @@ function patternSpecificity(pattern: string): number {
 }
 
 /**
- * Resolve an agent ID from a JID.
- * Returns null if no route is defined for this JID.
- * Supports wildcard patterns using * (e.g., "whatsapp:*", "dc:*", "*").
+ * Resolve an agent ID from a JID or thread ID.
+ * Returns null if no route is defined for this ID.
+ * Supports wildcard patterns using * (e.g., "whatsapp:*", "dc:*", "discord:*", "*").
+ *
+ * Handles both legacy formats (dc:123) and Chat SDK formats (discord:guildId:channelId).
  */
 export function resolveAgentId(jid: string): string | null {
   // Fast path: exact match
   if (dbRoutes[jid]) return dbRoutes[jid];
+
+  // Handle Chat SDK thread ID format: discord:guildId:channelId or discord:guildId:channelId:threadId
+  // Convert to legacy dc: format for route matching
+  let legacyJid = jid;
+  if (jid.startsWith('discord:')) {
+    const parts = jid.split(':');
+    if (parts.length >= 3) {
+      // Extract channel ID (3rd part)
+      const channelId = parts[2];
+      legacyJid = `dc:${channelId}`;
+    }
+  }
+
+  // Check if legacy format has a route
+  if (legacyJid !== jid && dbRoutes[legacyJid]) {
+    return dbRoutes[legacyJid];
+  }
 
   // Check wildcard patterns (sorted by specificity descending)
   const patterns = Object.keys(dbRoutes)
@@ -45,6 +64,10 @@ export function resolveAgentId(jid: string): string | null {
 
   for (const pattern of patterns) {
     if (globToRegex(pattern).test(jid)) {
+      return dbRoutes[pattern];
+    }
+    // Also check against legacy format
+    if (legacyJid !== jid && globToRegex(pattern).test(legacyJid)) {
       return dbRoutes[pattern];
     }
   }

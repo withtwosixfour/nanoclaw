@@ -35,6 +35,7 @@ let sessions: Record<string, string> = {};
 let agents: Record<string, Agent> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let lastCommandTimestamp: Record<string, string> = {};
+let botInstance: Chat | null = null;
 
 // Track which messages we're processing (for 👀 reactions)
 const processingMessages = new Map<
@@ -43,17 +44,27 @@ const processingMessages = new Map<
 >();
 
 /**
- * Convert Chat SDK thread ID to our JID format
+ * Convert Chat SDK thread ID to our internal ID format
+ * Chat SDK thread IDs are already in the correct format (e.g., "discord:guildId:channelId")
+ * so we just return them as-is for routing and storage.
  */
 function threadIdToJid(threadId: string): string {
-  return `dc:${threadId}`;
+  // Chat SDK thread IDs are already in the correct format
+  // e.g., "discord:987654321:123456789"
+  return threadId;
 }
 
 /**
- * Convert our JID format to Chat SDK thread ID
+ * Convert our internal ID format to Chat SDK thread ID
+ * Since we're now using Chat SDK thread IDs directly, this is a no-op.
  */
 function jidToThreadId(jid: string): string {
-  return jid.replace(/^dc:/, '');
+  // If it starts with dc:, it's a legacy ID - convert to Chat SDK format
+  if (jid.startsWith('dc:')) {
+    return `discord::${jid.slice(3)}`;
+  }
+  // Otherwise it's already a Chat SDK thread ID
+  return jid;
 }
 
 /**
@@ -517,7 +528,57 @@ export async function createChatSdkBot(): Promise<Chat> {
     await event.channel.post(response);
   });
 
+  // Store the bot instance for use by other modules
+  botInstance = bot;
+
   return bot;
+}
+
+/**
+ * Send a message to a specific JID (used by scheduler and other modules)
+ * This opens a DM or finds the channel to send the message
+ */
+export async function sendMessageToJid(
+  jid: string,
+  text: string,
+): Promise<void> {
+  if (!botInstance) {
+    logger.error({ jid }, 'Cannot send message - bot not initialized');
+    throw new Error('Bot not initialized');
+  }
+
+  const threadId = jidToThreadId(jid);
+
+  try {
+    // Try to get the Discord adapter and send via DM or channel
+    const discordAdapter = botInstance.getAdapter('discord');
+    if (!discordAdapter) {
+      logger.error({ jid }, 'Discord adapter not available');
+      throw new Error('Discord adapter not available');
+    }
+
+    // For Discord, we can try to open a DM or post to a channel
+    // The threadId format is: discord:{channelId}:{threadId} or just channelId
+    // We need to parse it properly
+
+    // Simple approach: post directly via the adapter's API
+    // This requires the adapter to have a method to post to a specific channel
+    const adapter = discordAdapter as any;
+
+    if (adapter.postMessage) {
+      await adapter.postMessage(threadId, text);
+      logger.info({ jid, text: text.slice(0, 50) }, 'Sent message via adapter');
+    } else {
+      logger.error({ jid }, 'Adapter does not support postMessage');
+      throw new Error('Adapter method not available');
+    }
+  } catch (err) {
+    logger.error(
+      { jid, err, text: text.slice(0, 50) },
+      'Failed to send message to JID',
+    );
+    throw err;
+  }
 }
 
 export { agents, sessions };

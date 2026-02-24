@@ -67,10 +67,12 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the JID's current session
+  // For group context mode, use the thread's current session
   const sessions = deps.getSessions();
+  // Use thread_id if available (new format), otherwise fall back to chat_jid (legacy)
+  const threadId = task.thread_id || task.chat_jid;
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.chat_jid] : undefined;
+    task.context_mode === 'group' ? sessions[threadId] : undefined;
 
   // Idle timer: closes the active run after IDLE_TIMEOUT of no output.
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -82,7 +84,7 @@ async function runTask(
         { taskId: task.id },
         'Scheduled task idle timeout, closing agent run',
       );
-      deps.queue.closeStdin(task.chat_jid);
+      deps.queue.closeStdin(threadId);
     }, IDLE_TIMEOUT);
   };
 
@@ -92,7 +94,7 @@ async function runTask(
         prompt: task.prompt,
         sessionId,
         agentId: task.agent_id,
-        chatJid: task.chat_jid,
+        chatJid: threadId,
         isMain,
         isScheduledTask: true,
         modelProvider: agent.modelProvider,
@@ -103,7 +105,7 @@ async function runTask(
           result = streamedOutput.result;
           // Forward result to user unless it's a NO_REPLY marker
           if (!isNoReply(streamedOutput.result)) {
-            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+            await deps.sendMessage(threadId, streamedOutput.result);
           }
           // Only reset idle timer on actual results, not session-update markers
           resetIdleTimer();

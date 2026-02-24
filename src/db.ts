@@ -40,6 +40,7 @@ function createSchema(database: Database.Database): void {
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
       chat_jid TEXT NOT NULL,
+      thread_id TEXT,  -- NEW: Chat SDK thread ID (e.g., "discord:123:456")
       prompt TEXT NOT NULL,
       schedule_type TEXT NOT NULL,
       schedule_value TEXT NOT NULL,
@@ -51,6 +52,7 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_thread_id ON scheduled_tasks(thread_id);
 
     CREATE TABLE IF NOT EXISTS task_run_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +210,21 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* columns already exist */
+  }
+
+  // Migration: Add thread_id column and convert dc: JIDs to discord: format
+  try {
+    // Add thread_id column if it doesn't exist
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN thread_id TEXT`);
+
+    // Migrate existing dc: JIDs to discord: format
+    database.exec(`
+      UPDATE scheduled_tasks 
+      SET thread_id = 'discord::' || substr(chat_jid, 4)
+      WHERE chat_jid LIKE 'dc:%' AND thread_id IS NULL
+    `);
+  } catch {
+    /* column already exists or no rows to migrate */
   }
 }
 
@@ -450,13 +467,14 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, agent_id, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, agent_id, chat_jid, thread_id, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
     task.agent_id,
     task.chat_jid,
+    task.thread_id || null,
     task.prompt,
     task.schedule_type,
     task.schedule_value,
