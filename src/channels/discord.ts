@@ -319,7 +319,16 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
             mediaNotes.push(buildMediaNote(attachment));
           } catch (err) {
             logger.error(
-              { attachment: att.name, error: err },
+              {
+                attachment: att.name,
+                attachmentUrl: att.url,
+                attachmentSize: att.size,
+                error: err instanceof Error ? err.message : String(err),
+                errorStack: err instanceof Error ? err.stack : undefined,
+                errorCode: (err as any)?.code,
+                errorStatus: (err as any)?.status,
+                chatJid,
+              },
               'Error processing Discord attachment',
             );
             mediaNotes.push(`[File: ${att.name || 'file'} - error processing]`);
@@ -458,7 +467,17 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
       }
       logger.info({ jid, length: text.length }, 'Discord message sent');
     } catch (err) {
-      logger.error({ jid, err }, 'Failed to send Discord message');
+      logger.error(
+        {
+          jid,
+          error: err instanceof Error ? err.message : String(err),
+          errorStack: err instanceof Error ? err.stack : undefined,
+          errorCode: (err as any)?.code,
+          errorStatus: (err as any)?.status,
+          textLength: text.length,
+        },
+        'Failed to send Discord message',
+      );
     }
   }
 
@@ -516,7 +535,15 @@ Add this to your \\\`ROUTES\\\` in \\\`src/router.ts\\\`:
       );
     } catch (err) {
       logger.error(
-        { jid, err, fileCount: filePaths.length },
+        {
+          jid,
+          error: err instanceof Error ? err.message : String(err),
+          errorStack: err instanceof Error ? err.stack : undefined,
+          errorCode: (err as any)?.code,
+          errorStatus: (err as any)?.status,
+          fileCount: filePaths.length,
+          filePaths,
+        },
         'Failed to send Discord message with attachments',
       );
     }

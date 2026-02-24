@@ -844,7 +844,15 @@ async function startMessageLoop(): Promise<void> {
         }
       }
     } catch (err) {
-      logger.error({ err }, 'Error in message loop');
+      logger.error(
+        {
+          error: err instanceof Error ? err.message : String(err),
+          errorStack: err instanceof Error ? err.stack : undefined,
+          lastTimestamp,
+          pollInterval: POLL_INTERVAL,
+        },
+        'Error in message loop',
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
   }
