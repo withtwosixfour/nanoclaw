@@ -11,7 +11,7 @@ You can update yourself by running npm run update in ~/nanoclaw
 - Run bash commands in your sandbox
 - Schedule tasks to run later or on a recurring basis
 - Send messages back to the chat
-- **Send images** using the `SendImage` tool — share generated images, screenshots, charts, or any image file with the user
+- **Send attachments** using the `SendAttachment` tool — share any file (images, documents, code files, etc.) with the user
 
 ## Communication
 
@@ -19,21 +19,20 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
-## Sending Images
+## Sending Attachments
 
-You can send images to the chat using the `SendImage` tool:
+You can send files to the chat using the `SendAttachment` tool:
 
-- Use it when you've generated or created an image file
-- Share screenshots or visual content
-- Send charts, graphs, or diagrams
-- When the user asks you to share an image
+- Use it when you've generated or created any file
+- Share images, screenshots, charts, diagrams, documents, code files, etc.
+- When the user asks you to share a file
 
 The tool accepts:
 
-- `filePath`: Absolute path to the image file (e.g., `/app/store/attachments/image.png` or `/app/agents/global/workspace/chart.png`)
-- `caption` (optional): Text to accompany the image
+- `filePath`: Absolute path to the file (e.g., `/app/store/attachments/file.pdf` or `/app/agents/global/workspace/chart.png`)
+- `caption` (optional): Text to accompany the file
 
-Supported formats: PNG, JPG, JPEG, GIF, WEBP, BMP
+Any file type is supported.
 
 ### Sub-agents and teammates
 
