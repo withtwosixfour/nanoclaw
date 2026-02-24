@@ -1124,6 +1124,10 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     let hadError = false;
     let errorMessage = '';
     let queryCount = 0;
+    const pendingImageAttachments: Array<{
+      filePath: string;
+      caption: string;
+    }> = [];
 
     try {
       while (true) {
@@ -1136,14 +1140,18 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         const queryIterationStart = Date.now();
         await maybeCompactSessionPreflight(input, sessionId, prompt, secrets);
 
-        const { newSessionId, responseText, usageTokens } = await runQuery(
-          prompt,
-          sessionId,
-          input,
-          secrets,
-          deps,
-        );
+        const {
+          newSessionId,
+          responseText,
+          usageTokens,
+          pendingImageAttachments: queryAttachments,
+        } = await runQuery(prompt, sessionId, input, secrets, deps);
         sessionId = newSessionId;
+
+        // Accumulate image attachments from this query iteration
+        if (queryAttachments && queryAttachments.length > 0) {
+          pendingImageAttachments.push(...queryAttachments);
+        }
 
         const queryIterationDuration = Date.now() - queryIterationStart;
         logger.info(
@@ -1175,6 +1183,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
               status: 'success',
               result: responseText,
               newSessionId: sessionId,
+              pendingImageAttachments,
             });
             logger.debug(
               { runId, agent: input.agentId },
@@ -1219,6 +1228,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           status: 'success',
           result: null,
           newSessionId: sessionId,
+          pendingImageAttachments,
         });
       }
 
@@ -1239,6 +1249,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         status: 'success',
         result: lastResponse,
         newSessionId: sessionId,
+        pendingImageAttachments,
       };
     } catch (err) {
       errorMessage = err instanceof Error ? err.message : String(err);
