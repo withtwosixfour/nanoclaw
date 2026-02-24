@@ -59,7 +59,7 @@ export const DISCORD_ONLY =
   (process.env.DISCORD_ONLY || envConfig.DISCORD_ONLY) === 'true';
 
 // Comma-separated list of authorized user IDs who can trigger /update command
-// Format: whatsapp:+1234567890,discord:123456789012345678
+// Format: 1234567890@s.whatsapp.net,discord:123456789012345678
 export const ADMIN_USER_IDS = (
   process.env.ADMIN_USER_IDS ||
   envConfig.ADMIN_USER_IDS ||

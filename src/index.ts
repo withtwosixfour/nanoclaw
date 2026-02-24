@@ -207,9 +207,7 @@ export async function executeCommand(
     const normalizedSender = sender || '';
     const isAuthorized =
       ADMIN_USER_IDS.length === 0 ||
-      ADMIN_USER_IDS.some(
-        (id) => normalizedSender.includes(id) || id.includes(normalizedSender),
-      );
+      ADMIN_USER_IDS.some((id) => normalizedSender === id);
 
     if (!isAuthorized) {
       logger.warn(
@@ -238,9 +236,12 @@ export async function executeCommand(
 
     // Spawn detached process to run npm update
     const { spawn } = await import('child_process');
+    const logPath = path.join(DATA_DIR, 'update.log');
+    const logStream = fs.openSync(logPath, 'a');
+
     const child = spawn('npm', ['run', 'update'], {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', logStream, logStream],
       cwd: process.cwd(),
     });
 
@@ -251,6 +252,17 @@ export async function executeCommand(
       try {
         fs.unlinkSync(pendingPath);
       } catch {}
+    });
+
+    // Handle process exit to catch execution failures
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        logger.error({ exitCode: code }, 'Update process failed');
+        // Clean up pending file on failure
+        try {
+          fs.unlinkSync(pendingPath);
+        } catch {}
+      }
     });
 
     child.unref();
