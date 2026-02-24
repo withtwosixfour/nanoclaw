@@ -17,10 +17,6 @@ The image will be attached to your message and sent to the chat.`,
       .describe(
         'Absolute path to the image file to send (e.g., /app/store/attachments/image.png or /app/agents/global/workspace/chart.png)',
       ),
-    caption: z
-      .string()
-      .optional()
-      .describe('Optional text caption or message to accompany the image'),
   }),
   execute: async (input: { filePath: string; caption?: string }) => {
     try {
@@ -57,7 +53,6 @@ The image will be attached to your message and sent to the chat.`,
         filePath: input.filePath,
         fileName,
         fileSize,
-        caption: input.caption || '',
       };
     } catch (err) {
       return {
