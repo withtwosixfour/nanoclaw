@@ -42,26 +42,10 @@ queue.setPipeMessageFn(agentRuntime.pipeMessage);
 queue.setCloseFn(agentRuntime.close);
 
 /**
- * Execute command (legacy compatibility)
- */
-export async function executeCommand(
-  chatJid: string,
-  command: string,
-  sender?: string,
-): Promise<string> {
-  // This is now handled in chat-sdk-bot.ts
-  // Keeping for backwards compatibility with existing code
-  return 'Commands are now handled by Chat SDK';
-}
-
-/**
  * Main entry point
  */
 async function main(): Promise<void> {
   logger.info('Starting NanoClaw with Chat SDK');
-
-  // Create and start the Chat SDK bot
-  const bot = await createChatSdkBot();
 
   // Log startup
   console.log('\n  NanoClaw Chat SDK Bot started');

@@ -46,17 +46,6 @@ const processingMessages = new Map<
 >();
 
 /**
- * Convert Chat SDK thread ID to our internal ID format
- * Chat SDK thread IDs are already in the correct format (e.g., "discord:guildId:channelId")
- * so we just return them as-is for routing and storage.
- */
-function threadIdToJid(threadId: string): string {
-  // Chat SDK thread IDs are already in the correct format
-  // e.g., "discord:987654321:123456789"
-  return threadId;
-}
-
-/**
  * Convert our internal ID format to Chat SDK thread ID
  * Since we're now using Chat SDK thread IDs directly, this is a no-op.
  */
@@ -405,12 +394,11 @@ export async function createChatSdkBot(): Promise<Chat> {
 
   // Handle new mentions (@bot)
   bot.onNewMention(async (thread, message) => {
-    const chatJid = threadIdToJid(thread.id);
-    const agent = resolveAgentForJid(chatJid);
+    const agent = resolveAgentForJid(thread.id);
 
     if (!agent) {
       logger.info(
-        { chatJid, threadId: thread.id },
+        { threadId: thread.id },
         'Channel not routed; ignoring mention',
       );
       return;
@@ -429,11 +417,11 @@ export async function createChatSdkBot(): Promise<Chat> {
     }
 
     // Add acknowledgement reaction
-    await addAcknowledgement(thread, message.id, chatJid);
+    await addAcknowledgement(thread, message.id, thread.id);
 
     // Store the message
     handleIncomingMessage(
-      chatJid,
+      thread.id,
       message.id,
       message.author?.userId || 'unknown',
       message.author?.userName || 'Unknown',
@@ -443,14 +431,13 @@ export async function createChatSdkBot(): Promise<Chat> {
     );
 
     // Run agent
-    const sessionId = ensureSessionForJid(chatJid);
-    await runAgent(chatJid, agent, content, sessionId, thread, message.id);
+    const sessionId = ensureSessionForJid(thread.id);
+    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
   });
 
   // Handle subscribed messages (follow-ups in same thread)
   bot.onSubscribedMessage(async (thread, message) => {
-    const chatJid = threadIdToJid(thread.id);
-    const agent = resolveAgentForJid(chatJid);
+    const agent = resolveAgentForJid(thread.id);
 
     if (!agent) {
       return;
@@ -465,7 +452,7 @@ export async function createChatSdkBot(): Promise<Chat> {
       const command = trimmed.slice(1).toLowerCase();
       if (['clear', 'status', 'chatid', 'update'].includes(command)) {
         const response = await executeCommand(
-          chatJid,
+          thread.id,
           command,
           message.author?.userId,
         );
@@ -475,11 +462,11 @@ export async function createChatSdkBot(): Promise<Chat> {
     }
 
     // Add acknowledgement
-    await addAcknowledgement(thread, message.id, chatJid);
+    await addAcknowledgement(thread, message.id, thread.id);
 
     // Store message
     handleIncomingMessage(
-      chatJid,
+      thread.id,
       message.id,
       message.author?.userId || 'unknown',
       message.author?.userName || 'Unknown',
@@ -488,8 +475,8 @@ export async function createChatSdkBot(): Promise<Chat> {
     );
 
     // Run agent
-    const sessionId = ensureSessionForJid(chatJid);
-    await runAgent(chatJid, agent, content, sessionId, thread, message.id);
+    const sessionId = ensureSessionForJid(thread.id);
+    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
   });
 
   // Handle ALL messages in unsubscribed threads (catch-all)
@@ -497,8 +484,7 @@ export async function createChatSdkBot(): Promise<Chat> {
     // Skip if already subscribed (onSubscribedMessage will handle it)
     if (await thread.isSubscribed()) return;
 
-    const chatJid = threadIdToJid(thread.id);
-    const agent = resolveAgentForJid(chatJid);
+    const agent = resolveAgentForJid(thread.id);
 
     if (!agent) {
       // Channel not routed - ignore
@@ -515,11 +501,11 @@ export async function createChatSdkBot(): Promise<Chat> {
     }
 
     // Add acknowledgement reaction
-    await addAcknowledgement(thread, message.id, chatJid);
+    await addAcknowledgement(thread, message.id, thread.id);
 
     // Store the message
     handleIncomingMessage(
-      chatJid,
+      thread.id,
       message.id,
       message.author?.userId || 'unknown',
       message.author?.userName || 'Unknown',
@@ -528,33 +514,29 @@ export async function createChatSdkBot(): Promise<Chat> {
     );
 
     // Run agent
-    const sessionId = ensureSessionForJid(chatJid);
-    await runAgent(chatJid, agent, content, sessionId, thread, message.id);
+    const sessionId = ensureSessionForJid(thread.id);
+    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
   });
 
   // Handle slash commands
-  bot.onSlashCommand('clear', async (event) => {
-    const chatJid = threadIdToJid(event.channel.id);
-    const response = await executeCommand(chatJid, 'clear', event.user.userId);
-    await event.channel.post(response);
+  bot.onSlashCommand('clear', async ({ channel, user }) => {
+    const response = await executeCommand(channel.id, 'clear', user.userId);
+    await channel.post(response);
   });
 
-  bot.onSlashCommand('status', async (event) => {
-    const chatJid = threadIdToJid(event.channel.id);
-    const response = await executeCommand(chatJid, 'status', event.user.userId);
-    await event.channel.post(response);
+  bot.onSlashCommand('status', async ({ channel, user }) => {
+    const response = await executeCommand(channel.id, 'status', user.userId);
+    await channel.post(response);
   });
 
-  bot.onSlashCommand('chatid', async (event) => {
-    const chatJid = threadIdToJid(event.channel.id);
-    const response = await executeCommand(chatJid, 'chatid', event.user.userId);
-    await event.channel.post(response);
+  bot.onSlashCommand('chatid', async ({ channel, user }) => {
+    const response = await executeCommand(channel.id, 'chatid', user.userId);
+    await channel.post(response);
   });
 
-  bot.onSlashCommand('update', async (event) => {
-    const chatJid = threadIdToJid(event.channel.id);
-    const response = await executeCommand(chatJid, 'update', event.user.userId);
-    await event.channel.post(response);
+  bot.onSlashCommand('update', async ({ channel, user }) => {
+    const response = await executeCommand(channel.id, 'update', user.userId);
+    await channel.post(response);
   });
 
   // Store the bot instance for use by other modules
