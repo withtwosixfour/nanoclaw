@@ -52,7 +52,7 @@ export interface AgentOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
-  pendingImageAttachments?: Array<{
+  pendingAttachments?: Array<{
     filePath: string;
     caption: string;
   }>;
@@ -253,7 +253,7 @@ async function runQuery(
   newSessionId: string;
   responseText: string;
   usageTokens: number;
-  pendingImageAttachments?: Array<{ filePath: string; caption: string }>;
+  pendingAttachments?: Array<{ filePath: string; caption: string }>;
 }> {
   const queryStartTime = Date.now();
   const config = getModelConfig(input.modelProvider, input.modelName);
@@ -537,9 +537,8 @@ async function runQuery(
     'Query completed successfully',
   );
 
-  // Extract pending image attachments from tool results
-  const pendingImageAttachments: Array<{ filePath: string; caption: string }> =
-    [];
+  // Extract pending attachments from tool results
+  const pendingAttachments: Array<{ filePath: string; caption: string }> = [];
 
   for (const message of responseMessages) {
     if (message.role === 'tool') {
@@ -547,14 +546,14 @@ async function runQuery(
       const content = message.content;
       if (Array.isArray(content)) {
         for (const part of content) {
-          if (isToolResultPart(part) && part.toolName === 'SendImage') {
+          if (isToolResultPart(part) && part.toolName === 'SendAttachment') {
             try {
               const result =
                 typeof part.output === 'string'
                   ? JSON.parse(part.output)
                   : part.output;
               if (result && result.success && result.filePath) {
-                pendingImageAttachments.push({
+                pendingAttachments.push({
                   filePath: result.filePath,
                   caption: result.caption || '',
                 });
@@ -572,7 +571,7 @@ async function runQuery(
     newSessionId: sessionId,
     responseText,
     usageTokens,
-    pendingImageAttachments,
+    pendingAttachments,
   };
 }
 
