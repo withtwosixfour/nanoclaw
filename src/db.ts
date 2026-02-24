@@ -134,6 +134,48 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Migrate scheduled_tasks: rename group_folder -> agent_id (v2.0 migration)
+  try {
+    const hasOldColumn = database
+      .prepare(
+        `SELECT 1 FROM pragma_table_info('scheduled_tasks') WHERE name = 'group_folder'`,
+      )
+      .get();
+
+    if (hasOldColumn) {
+      database.exec(`
+        CREATE TABLE scheduled_tasks_new (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          context_mode TEXT DEFAULT 'isolated',
+          next_run TEXT,
+          last_run TEXT,
+          last_result TEXT,
+          status TEXT DEFAULT 'active',
+          created_at TEXT NOT NULL
+        );
+        
+        INSERT INTO scheduled_tasks_new 
+        SELECT id, group_folder as agent_id, chat_jid, prompt, 
+               schedule_type, schedule_value, context_mode, 
+               next_run, last_run, last_result, status, created_at 
+        FROM scheduled_tasks;
+        
+        DROP TABLE scheduled_tasks;
+        ALTER TABLE scheduled_tasks_new RENAME TO scheduled_tasks;
+        
+        CREATE INDEX idx_next_run ON scheduled_tasks(next_run);
+        CREATE INDEX idx_status ON scheduled_tasks(status);
+      `);
+    }
+  } catch {
+    /* Migration already done or no old table */
+  }
+
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
