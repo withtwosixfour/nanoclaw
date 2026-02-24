@@ -3,20 +3,23 @@ import path from 'path';
 import { z } from 'zod';
 import { tool } from 'ai';
 
-export const SendImage = tool({
-  description: `Send an image file to the user in the chat. Use this tool when:
-- You have generated or created an image file
-- You want to share a screenshot or visual content
-- You need to show the user something visual
-- The user asks you to send an image
+export const SendAttachment = tool({
+  description: `Send a file attachment to the user in the chat. Use this tool when:
+- You have generated or created any file (image, document, code, etc.)
+- You want to share a file with the user
+- The user asks you to send a file
 
-The image will be attached to your message and sent to the chat.`,
+The file will be attached to your message and sent to the chat.`,
   inputSchema: z.object({
     filePath: z
       .string()
       .describe(
-        'Absolute path to the image file to send (e.g., /app/store/attachments/image.png or /app/agents/global/workspace/chart.png)',
+        'Absolute path to the file to send (e.g., /app/store/attachments/file.pdf or /app/agents/global/workspace/chart.png)',
       ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional text to accompany the file'),
   }),
   execute: async (input: { filePath: string; caption?: string }) => {
     try {
@@ -38,14 +41,6 @@ The image will be attached to your message and sent to the chat.`,
       // Get file info
       const fileName = path.basename(input.filePath);
       const fileSize = stat.size;
-      const ext = path.extname(input.filePath).toLowerCase();
-      const validImageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
-
-      if (!validImageExts.includes(ext)) {
-        return {
-          error: `File is not a supported image format. Supported: ${validImageExts.join(', ')}`,
-        };
-      }
 
       // Return success - actual sending happens in runtime
       return {
@@ -53,10 +48,11 @@ The image will be attached to your message and sent to the chat.`,
         filePath: input.filePath,
         fileName,
         fileSize,
+        caption: input.caption,
       };
     } catch (err) {
       return {
-        error: `Failed to send image: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Failed to send attachment: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   },

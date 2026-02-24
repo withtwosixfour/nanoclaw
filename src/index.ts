@@ -15,7 +15,6 @@ import {
   TRIGGER_PATTERN,
 } from './config.js';
 import { DiscordChannel } from './channels/discord.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
   AgentOutput,
   AgentInput,
@@ -75,7 +74,6 @@ let lastAgentTimestamp: Record<string, string> = {};
 let lastCommandTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 const agentRuntime = createAgentRuntime({
@@ -518,48 +516,45 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
-    // Handle pending image attachments from SendImage tool calls
-    if (
-      result.pendingImageAttachments &&
-      result.pendingImageAttachments.length > 0
-    ) {
+    // Handle pending attachments from SendAttachment tool calls
+    if (result.pendingAttachments && result.pendingAttachments.length > 0) {
       logger.info(
         {
           agent: agent.name,
           chatJid,
-          imageCount: result.pendingImageAttachments.length,
+          attachmentCount: result.pendingAttachments.length,
         },
-        'Sending image attachments',
+        'Sending attachments',
       );
 
-      for (const imageAttachment of result.pendingImageAttachments) {
+      for (const attachment of result.pendingAttachments) {
         try {
           // Check if channel supports file attachments
           if (channel.sendMessageWithAttachments) {
             await channel.sendMessageWithAttachments(
               chatJid,
-              imageAttachment.caption,
-              [imageAttachment.filePath],
+              attachment.caption,
+              [attachment.filePath],
             );
 
             // Store outgoing attachment metadata
-            const attachment: Attachment = {
+            const attachmentData: Attachment = {
               id: crypto.randomUUID(),
-              filename: path.basename(imageAttachment.filePath),
-              path: imageAttachment.filePath,
-              mimeType: getMimeTypeFromExtension(imageAttachment.filePath),
-              size: fs.statSync(imageAttachment.filePath).size,
+              filename: path.basename(attachment.filePath),
+              path: attachment.filePath,
+              mimeType: getMimeTypeFromExtension(attachment.filePath),
+              size: fs.statSync(attachment.filePath).size,
               createdAt: new Date().toISOString(),
             };
-            storeAttachment(attachment, `outgoing-${Date.now()}`, chatJid);
+            storeAttachment(attachmentData, `outgoing-${Date.now()}`, chatJid);
 
             logger.debug(
               {
                 agent: agent.name,
                 chatJid,
-                filePath: imageAttachment.filePath,
+                filePath: attachment.filePath,
               },
-              'Image attachment sent',
+              'Attachment sent',
             );
           } else {
             logger.warn(
@@ -572,11 +567,11 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
             {
               agent: agent.name,
               chatJid,
-              filePath: imageAttachment.filePath,
+              filePath: attachment.filePath,
               error:
                 sendErr instanceof Error ? sendErr.message : String(sendErr),
             },
-            'Failed to send image attachment',
+            'Failed to send attachment',
           );
         }
       }
@@ -1007,9 +1002,10 @@ async function main(): Promise<void> {
   }
 
   if (!DISCORD_ONLY) {
-    whatsapp = new WhatsAppChannel(channelOpts);
-    channels.push(whatsapp);
-    await whatsapp.connect();
+    // WhatsApp support has been removed, Discord only mode is enabled by default
+    logger.warn(
+      'WhatsApp channel support has been removed. Only Discord is supported.',
+    );
   }
 
   // Start subsystems (independently of connection handler)

@@ -6,7 +6,7 @@ import {
   NanoClawContext,
   NanoClawDeps,
 } from './tools/nanoclaw.js';
-import { SendImage } from './tools/send-image.js';
+import { SendAttachment } from './tools/send-attachment.js';
 import { WorkspaceContext } from './workspace-paths.js';
 
 export function createToolRegistry(options: {
@@ -19,6 +19,6 @@ export function createToolRegistry(options: {
     ...createFsTools(options.workspace),
     ...createWebTools(),
     ...createNanoClawTools(options.nanoclawDeps, options.nanoclawContext),
-    SendImage,
+    SendAttachment,
   };
 }
