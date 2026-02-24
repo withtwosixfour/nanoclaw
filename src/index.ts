@@ -549,7 +549,7 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
             imageAttachment.filePath,
           ]);
 
-          // Store outgoing attachment metadata
+          // Store outgoing attachment metadata (best effort - may fail if message not in DB)
           const attachment: Attachment = {
             id: crypto.randomUUID(),
             filename: path.basename(imageAttachment.filePath),
@@ -558,7 +558,14 @@ async function processJidMessages(chatJid: string): Promise<boolean> {
             size: fs.statSync(imageAttachment.filePath).size,
             createdAt: new Date().toISOString(),
           };
-          storeAttachment(attachment, `outgoing-${Date.now()}`, chatJid);
+          try {
+            storeAttachment(attachment, `outgoing-${Date.now()}`, chatJid);
+          } catch (err) {
+            logger.debug(
+              { error: err instanceof Error ? err.message : String(err) },
+              'Failed to store attachment metadata (non-critical)',
+            );
+          }
 
           logger.debug(
             {
