@@ -8,7 +8,7 @@
     "build": "tsc",
     "update": "git pull && npm install && npm run build && systemctl --user restart nanoclaw",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "dev": "LOG_LEVEL=debug tsx src/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",
