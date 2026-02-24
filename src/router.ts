@@ -3,6 +3,13 @@ import { AGENTS_DIR, SESSIONS_DIR } from './config.js';
 import { Channel, NewMessage } from './types.js';
 
 // Database-backed routes (populated from DB on startup)
+// Format: threadIdPattern -> agentId
+// Supports multi-platform routing:
+//   - Exact: 'discord:123:456' -> 'main'
+//   - Guild wildcard: 'discord:123:*' -> 'support-agent' (all channels in guild)
+//   - Platform wildcard: 'discord:*' -> 'discord-bot' (all Discord channels)
+//   - Cross-platform: '*' -> 'universal-agent' (all channels on all platforms)
+//   - Legacy: 'dc:123' -> 'main' (backward compatible)
 let dbRoutes: Record<string, string> = {};
 
 /**
@@ -104,38 +111,59 @@ export function parseThreadId(threadId: string): {
 /**
  * Resolve an agent ID from a thread ID.
  * Returns null if no route is defined for this ID.
- * Supports wildcard patterns using * (e.g., "discord:*", "slack:*", "*").
  *
- * Handles all Chat SDK formats and legacy formats.
+ * Supports multiple matching strategies (in order of priority):
+ * 1. Exact match: 'discord:123:456' matches route 'discord:123:456'
+ * 2. Short format: 'discord:456' matches route 'discord:456'
+ * 3. Legacy format: 'dc:456' matches route 'dc:456'
+ * 4. Wildcard patterns (sorted by specificity):
+ *    - 'discord:123:*' matches 'discord:123:456' (guild-specific)
+ *    - 'discord:*' matches all Discord channels
+ *    - 'slack:*' matches all Slack channels
+ *    - '*' matches everything
+ *
+ * Examples:
+ *   Thread 'discord:987654321:123456789' matches:
+ *     - 'discord:987654321:123456789' (exact)
+ *     - 'discord:123456789' (short)
+ *     - 'discord:987654321:*' (guild wildcard)
+ *     - 'discord:*' (platform wildcard)
+ *     - '*' (global wildcard)
+ *
+ * Handles all Chat SDK formats: discord:..., slack:..., teams:..., gchat:...
+ * Also handles legacy formats: dc:... (auto-converted to discord::...)
  */
 export function resolveAgentId(threadId: string): string | null {
-  // Fast path: exact match
+  // Fast path: exact match on full thread ID
   if (dbRoutes[threadId]) return dbRoutes[threadId];
 
-  // Parse the thread ID
+  // Parse the thread ID to extract platform and channel
   const parsed = parseThreadId(threadId);
   if (!parsed) return null;
 
-  // Try matching against various formats
+  // Build list of formats to try matching against
+  // Priority: most specific → least specific
   const formatsToTry = [
-    threadId, // Full format: discord:guild:channel
-    `${parsed.platform}:${parsed.channelId}`, // Short format: discord:channel
-    `dc:${parsed.channelId}`, // Legacy format: dc:channel
+    threadId, // Full: discord:guildId:channelId
+    `${parsed.platform}:${parsed.channelId}`, // Short: discord:channelId
+    `dc:${parsed.channelId}`, // Legacy: dc:channelId
   ];
 
+  // Try exact matches first
   for (const format of formatsToTry) {
     if (dbRoutes[format]) return dbRoutes[format];
   }
 
-  // Check wildcard patterns (sorted by specificity descending)
+  // Check wildcard patterns (sorted by specificity - most specific first)
   const patterns = Object.keys(dbRoutes)
     .filter((p) => p.includes('*'))
     .sort((a, b) => patternSpecificity(b) - patternSpecificity(a));
 
+  // Try matching each pattern against all formats
   for (const pattern of patterns) {
-    // Try matching against all formats
+    const regex = globToRegex(pattern);
     for (const format of formatsToTry) {
-      if (globToRegex(pattern).test(format)) {
+      if (regex.test(format)) {
         return dbRoutes[pattern];
       }
     }
