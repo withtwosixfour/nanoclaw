@@ -56,11 +56,38 @@ function scheduleTask(
       };
     }
   } else if (args.schedule_type === 'interval') {
-    const ms = parseInt(args.schedule_value, 10);
+    // Parse duration strings like "30m", "1h", "2d" or plain milliseconds
+    const durationValue = args.schedule_value.trim();
+    const durationMatch = durationValue.match(/^(\d+)\s*([smhd])?$/i);
+    let ms: number;
+
+    if (durationMatch) {
+      const num = parseInt(durationMatch[1], 10);
+      const unit = (durationMatch[2] || 's').toLowerCase();
+      switch (unit) {
+        case 's':
+          ms = num * 1000;
+          break;
+        case 'm':
+          ms = num * 60 * 1000;
+          break;
+        case 'h':
+          ms = num * 60 * 60 * 1000;
+          break;
+        case 'd':
+          ms = num * 24 * 60 * 60 * 1000;
+          break;
+        default:
+          ms = num;
+      }
+    } else {
+      ms = parseInt(durationValue, 10);
+    }
+
     if (isNaN(ms) || ms <= 0) {
       return {
         ok: false,
-        message: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).`,
+        message: `Invalid interval: "${args.schedule_value}". Use format like "30m" (30 minutes), "1h" (1 hour), "2d" (2 days), or milliseconds like "300000" (5 min).`,
       };
     }
   } else if (args.schedule_type === 'once') {
@@ -99,10 +126,39 @@ function scheduleTask(
     });
     nextRun = interval.next().toISOString();
   } else if (args.schedule_type === 'interval') {
-    const ms = parseInt(args.schedule_value, 10);
+    // Parse duration strings like "30m", "1h", "2d" or plain milliseconds
+    const durationValue = args.schedule_value.trim();
+    const durationMatch = durationValue.match(/^(\d+)\s*([smhd])?$/i);
+    let ms: number;
+
+    if (durationMatch) {
+      const num = parseInt(durationMatch[1], 10);
+      const unit = (durationMatch[2] || 's').toLowerCase();
+      switch (unit) {
+        case 's':
+          ms = num * 1000;
+          break;
+        case 'm':
+          ms = num * 60 * 1000;
+          break;
+        case 'h':
+          ms = num * 60 * 60 * 1000;
+          break;
+        case 'd':
+          ms = num * 24 * 60 * 60 * 1000;
+          break;
+        default:
+          ms = num;
+      }
+    } else {
+      ms = parseInt(durationValue, 10);
+    }
+
     nextRun = new Date(Date.now() + ms).toISOString();
   } else if (args.schedule_type === 'once') {
-    nextRun = new Date(args.schedule_value).toISOString();
+    // Use schedule_value directly as the target time (no timezone conversion)
+    // User provides time in their desired timezone, we store as-is
+    nextRun = args.schedule_value;
   }
 
   const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

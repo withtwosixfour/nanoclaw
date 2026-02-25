@@ -118,8 +118,38 @@ async function runTask(
     });
     nextRun = interval.next().toISOString();
   } else if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    nextRun = new Date(Date.now() + ms).toISOString();
+    // Parse duration strings like "30m", "1h", "2d" or plain milliseconds
+    const durationValue = task.schedule_value.trim();
+    let ms: number;
+
+    const durationMatch = durationValue.match(/^(\d+)\s*([smhd])?$/i);
+    if (durationMatch) {
+      const num = parseInt(durationMatch[1], 10);
+      const unit = (durationMatch[2] || 's').toLowerCase();
+      switch (unit) {
+        case 's':
+          ms = num * 1000;
+          break;
+        case 'm':
+          ms = num * 60 * 1000;
+          break;
+        case 'h':
+          ms = num * 60 * 60 * 1000;
+          break;
+        case 'd':
+          ms = num * 24 * 60 * 60 * 1000;
+          break;
+        default:
+          ms = num;
+      }
+    } else {
+      // Fallback to plain milliseconds for backward compatibility
+      ms = parseInt(durationValue, 10);
+    }
+
+    if (!isNaN(ms) && ms > 0) {
+      nextRun = new Date(Date.now() + ms).toISOString();
+    }
   }
   // 'once' tasks have no next run
 
@@ -143,6 +173,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
+      logger.debug('Scheduler loop iteration starting');
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');
@@ -163,6 +194,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           );
         });
       }
+      logger.debug('Scheduler loop iteration completed');
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
     }
