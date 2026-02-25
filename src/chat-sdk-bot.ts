@@ -410,86 +410,81 @@ async function runAgent(
   };
 
   try {
-    await agentRuntime.run(input, async (output) => {
-      if (output.status === 'success' && output.result) {
-        // Clear acknowledgement before sending
-        await clearAcknowledgement(thread, messageId, chatJid);
+    const output = await agentRuntime.run(input);
 
-        // Send the response
-        await thread.post(output.result);
+    if (output.status === 'success' && output.result) {
+      // Clear acknowledgement before sending
+      await clearAcknowledgement(thread, messageId, chatJid);
 
-        // Update timestamp
-        lastAgentTimestamp[chatJid] = new Date().toISOString();
-      } else if (output.status === 'error') {
-        await clearAcknowledgement(thread, messageId, chatJid);
-        logger.error({ chatJid, error: output.error }, 'Agent error');
-        await thread.post(
-          'Sorry, I encountered an error processing your request.',
-        );
-      }
+      // Send the response
+      await thread.post(output.result);
 
-      // Handle pending attachments from SendAttachment tool calls
-      if (output.pendingAttachments && output.pendingAttachments.length > 0) {
-        logger.info(
-          {
-            agent: agent.id,
-            chatJid,
-            attachmentCount: output.pendingAttachments.length,
-          },
-          'Sending attachments',
-        );
+      // Update timestamp
+      lastAgentTimestamp[chatJid] = new Date().toISOString();
+    } else if (output.status === 'error') {
+      await clearAcknowledgement(thread, messageId, chatJid);
+      logger.error({ chatJid, error: output.error }, 'Agent error');
+      await thread.post(
+        'Sorry, I encountered an error processing your request.',
+      );
+    }
 
-        for (const pendingAtt of output.pendingAttachments) {
-          try {
-            // Read the file and send via Chat SDK
-            const fileBuffer = await fs.promises.readFile(pendingAtt.filePath);
-            const filename = path.basename(pendingAtt.filePath);
-            const mimeType = getMimeTypeFromExtension(pendingAtt.filePath);
+    // Handle pending attachments from SendAttachment tool calls
+    if (output.pendingAttachments && output.pendingAttachments.length > 0) {
+      logger.info(
+        {
+          agent: agent.id,
+          chatJid,
+          attachmentCount: output.pendingAttachments.length,
+        },
+        'Sending attachments',
+      );
 
-            await thread.post({
-              markdown: pendingAtt.caption || '',
-              files: [
-                {
-                  data: fileBuffer,
-                  filename,
-                  mimeType,
-                },
-              ],
-            });
+      for (const pendingAtt of output.pendingAttachments) {
+        try {
+          // Read the file and send via Chat SDK
+          const fileBuffer = await fs.promises.readFile(pendingAtt.filePath);
+          const filename = path.basename(pendingAtt.filePath);
+          const mimeType = getMimeTypeFromExtension(pendingAtt.filePath);
 
-            logger.info(
+          await thread.post({
+            markdown: pendingAtt.caption || '',
+            files: [
               {
-                filePath: pendingAtt.filePath,
+                data: fileBuffer,
                 filename,
                 mimeType,
-                size: fileBuffer.length,
               },
-              'Attachment sent',
-            );
-          } catch (sendErr) {
-            logger.error(
-              {
-                agent: agent.id,
-                chatJid,
-                filePath: pendingAtt.filePath,
-                error:
-                  sendErr instanceof Error ? sendErr.message : String(sendErr),
-              },
-              'Failed to send attachment',
-            );
-          }
+            ],
+          });
+
+          logger.info(
+            {
+              filePath: pendingAtt.filePath,
+              filename,
+              mimeType,
+              size: fileBuffer.length,
+            },
+            'Attachment sent',
+          );
+        } catch (sendErr) {
+          logger.error(
+            {
+              agent: agent.id,
+              chatJid,
+              filePath: pendingAtt.filePath,
+              error:
+                sendErr instanceof Error ? sendErr.message : String(sendErr),
+            },
+            'Failed to send attachment',
+          );
         }
       }
-    });
+    }
   } catch (err) {
     await clearAcknowledgement(thread, messageId, chatJid);
     logger.error({ chatJid, err }, 'Failed to run agent');
     await thread.post('Sorry, I encountered an error.');
-  } finally {
-    // Close the pipe to signal that we're done processing this message
-    // This allows the agent runtime to exit its message loop and return
-    agentRuntime.close(chatJid);
-    logger.debug({ chatJid }, 'Closed agent runtime pipe');
   }
 }
 
@@ -626,6 +621,11 @@ export async function createChatSdkBot(): Promise<Chat> {
   });
 
   bot.onNewMention(async (thread, message) => {
+    logger.debug(
+      { threadId: thread.id, messageId: message.id },
+      'incoming onNewMention',
+    );
+
     const agent = resolveAgentForJid(thread.id);
 
     if (!agent) {
@@ -760,76 +760,29 @@ export async function createChatSdkBot(): Promise<Chat> {
     );
   });
 
-  // Handle subscribed messages (follow-ups in same thread)
-  bot.onSubscribedMessage(async (thread, message) => {
-    const agent = resolveAgentForJid(thread.id);
+  // Handle ALL messages in unsubscribed threads (catch-all)
+  bot.onNewMessage(/.*/, async (thread, message) => {
+    logger.debug(
+      { threadId: thread.id, messageId: message.id },
+      'incoming onNewMessage',
+    );
 
-    if (!agent) {
+    if (message.author.isMe) {
+      logger.debug(
+        { threadId: thread.id, messageId: message.id },
+        'skipping message from me',
+      );
+    }
+
+    if (message.isMention) {
+      logger.info(
+        { threadId: thread.id, messageId: message.id },
+        'skipping, detected mention in new message',
+      );
+
       return;
     }
 
-    // Get content
-    let content = message.text || '';
-
-    // Process attachments from Chat SDK message
-    let savedAttachments: InternalAttachment[] = [];
-
-    if (message.attachments && message.attachments.length > 0) {
-      logger.info(
-        { threadId: thread.id, attachmentCount: message.attachments.length },
-        'Processing attachments from subscribed message',
-      );
-
-      const { savedAttachments: attachments, mediaNotes } =
-        await processChatSdkAttachments(message.attachments);
-      savedAttachments = attachments;
-
-      // Append media notes to content
-      if (mediaNotes.length > 0) {
-        if (content) {
-          content = `${content}\n\n${mediaNotes.join('\n')}`;
-        } else {
-          content = mediaNotes.join('\n');
-        }
-      }
-    }
-
-    // Check for commands
-    const trimmed = content.trim();
-    if (trimmed.startsWith('/')) {
-      const command = trimmed.slice(1).toLowerCase();
-      if (['clear', 'status', 'chatid', 'update'].includes(command)) {
-        const response = await executeCommand(
-          thread.id,
-          command,
-          message.author?.userId,
-        );
-        await thread.post(response);
-        return;
-      }
-    }
-
-    // Add acknowledgement
-    await addAcknowledgement(thread, message.id, thread.id);
-
-    // Store message
-    handleIncomingMessage(
-      thread.id,
-      message.id,
-      message.author?.userId || 'unknown',
-      message.author?.userName || 'Unknown',
-      content,
-      message.metadata?.dateSent?.toISOString() || new Date().toISOString(),
-      savedAttachments,
-    );
-
-    // Run agent
-    const sessionId = ensureSessionForThread(thread.id);
-    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
-  });
-
-  // Handle ALL messages in unsubscribed threads (catch-all)
-  bot.onNewMessage(/.*/, async (thread, message) => {
     // Skip if already subscribed (onSubscribedMessage will handle it)
     if (await thread.isSubscribed()) {
       logger.info(

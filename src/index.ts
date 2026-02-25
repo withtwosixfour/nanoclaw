@@ -60,9 +60,6 @@ const agentRuntime = createAgentRuntime({
   getRegisteredAgents: () => agents,
 });
 
-queue.setPipeMessageFn(agentRuntime.pipeMessage);
-queue.setCloseFn(agentRuntime.close);
-
 /**
  * Main entry point
  */
@@ -81,20 +78,9 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     agents: () => agents,
     getSessions: () => sessions,
-    queue,
     runAgent: async (input: AgentInput) => {
-      // Run the agent and stream results
-      return new Promise((resolve) => {
-        agentRuntime.run(input, async (output: AgentOutput) => {
-          if (output.status === 'success' || output.status === 'error') {
-            resolve({
-              status: output.status,
-              result: output.result,
-              newSessionId: output.newSessionId || input.sessionId,
-            });
-          }
-        });
-      });
+      // Run the agent and return result
+      return await agentRuntime.run(input);
     },
     sendMessage: async (jid, rawText) => {
       const text = formatOutbound(rawText);
