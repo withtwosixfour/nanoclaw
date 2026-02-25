@@ -2,6 +2,7 @@ import type { Lock, StateAdapter } from 'chat';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { logger } from './logger.js';
 
 interface SQLiteLock extends Lock {
   expiresAt: number;
@@ -29,8 +30,14 @@ export class SQLiteStateAdapter implements StateAdapter {
 
   async connect(): Promise<void> {
     if (this.connected) {
+      logger.debug(
+        { dbPath: this.dbPath },
+        'SQLiteStateAdapter already connected',
+      );
       return;
     }
+
+    logger.info({ dbPath: this.dbPath }, 'SQLiteStateAdapter connecting...');
 
     // Ensure the directory exists before creating the database
     const dir = path.dirname(this.dbPath);
@@ -41,6 +48,11 @@ export class SQLiteStateAdapter implements StateAdapter {
 
     // Enable WAL mode for better concurrency
     this.db.pragma('journal_mode = WAL');
+
+    logger.debug(
+      { dbPath: this.dbPath },
+      'SQLiteStateAdapter database opened, creating tables...',
+    );
 
     // Create tables if they don't exist
     this.db.exec(`
@@ -70,34 +82,48 @@ export class SQLiteStateAdapter implements StateAdapter {
 
     this.connected = true;
 
+    logger.info(
+      { dbPath: this.dbPath },
+      'SQLiteStateAdapter connected successfully',
+    );
+
     // Clean up any expired items on connect
     this.cleanupExpired();
   }
 
   async disconnect(): Promise<void> {
+    logger.info({ dbPath: this.dbPath }, 'SQLiteStateAdapter disconnecting...');
     if (this.db) {
       this.db.close();
       this.db = null;
     }
     this.connected = false;
+    logger.info({ dbPath: this.dbPath }, 'SQLiteStateAdapter disconnected');
   }
 
   async subscribe(threadId: string): Promise<void> {
     this.ensureConnected();
+    logger.debug({ threadId }, 'SQLiteStateAdapter subscribing to thread');
 
     const stmt = this.db!.prepare(
       `INSERT OR REPLACE INTO chat_sdk_subscriptions (thread_id) VALUES (?)`,
     );
     stmt.run(threadId);
+    logger.debug({ threadId }, 'SQLiteStateAdapter subscribed to thread');
   }
 
   async unsubscribe(threadId: string): Promise<void> {
     this.ensureConnected();
+    logger.debug({ threadId }, 'SQLiteStateAdapter unsubscribing from thread');
 
     const stmt = this.db!.prepare(
       `DELETE FROM chat_sdk_subscriptions WHERE thread_id = ?`,
     );
-    stmt.run(threadId);
+    const result = stmt.run(threadId);
+    logger.debug(
+      { threadId, changes: result.changes },
+      'SQLiteStateAdapter unsubscribed from thread',
+    );
   }
 
   async isSubscribed(threadId: string): Promise<boolean> {
@@ -107,11 +133,17 @@ export class SQLiteStateAdapter implements StateAdapter {
       `SELECT 1 FROM chat_sdk_subscriptions WHERE thread_id = ?`,
     );
     const result = stmt.get(threadId);
-    return result !== undefined;
+    const isSubscribed = result !== undefined;
+    logger.debug(
+      { threadId, isSubscribed },
+      'SQLiteStateAdapter checking subscription',
+    );
+    return isSubscribed;
   }
 
   async acquireLock(threadId: string, ttlMs: number): Promise<Lock | null> {
     this.ensureConnected();
+    logger.debug({ threadId, ttlMs }, 'SQLiteStateAdapter acquiring lock');
 
     // Clean up expired locks first
     this.cleanupExpiredLocks();
@@ -125,6 +157,10 @@ export class SQLiteStateAdapter implements StateAdapter {
       | undefined;
 
     if (existing && existing.expires_at > Date.now()) {
+      logger.debug(
+        { threadId, existingToken: existing.token },
+        'SQLiteStateAdapter lock already held',
+      );
       return null; // Already locked and not expired
     }
 
@@ -140,20 +176,44 @@ export class SQLiteStateAdapter implements StateAdapter {
     );
     insertStmt.run(threadId, lock.token, lock.expiresAt);
 
+    logger.debug(
+      { threadId, token: lock.token, expiresAt: lock.expiresAt },
+      'SQLiteStateAdapter lock acquired',
+    );
     return lock;
   }
 
   async releaseLock(lock: Lock): Promise<void> {
     this.ensureConnected();
+    logger.debug(
+      { threadId: lock.threadId, token: lock.token },
+      'SQLiteStateAdapter releasing lock',
+    );
 
     const stmt = this.db!.prepare(
       `DELETE FROM chat_sdk_locks WHERE thread_id = ? AND token = ?`,
     );
-    stmt.run(lock.threadId, lock.token);
+    const result = stmt.run(lock.threadId, lock.token);
+
+    if (result.changes === 0) {
+      logger.warn(
+        { threadId: lock.threadId, token: lock.token },
+        'SQLiteStateAdapter lock release had no effect - lock may not exist or token mismatch',
+      );
+    } else {
+      logger.debug(
+        { threadId: lock.threadId, token: lock.token, changes: result.changes },
+        'SQLiteStateAdapter lock released successfully',
+      );
+    }
   }
 
   async extendLock(lock: Lock, ttlMs: number): Promise<boolean> {
     this.ensureConnected();
+    logger.debug(
+      { threadId: lock.threadId, token: lock.token, ttlMs },
+      'SQLiteStateAdapter extending lock',
+    );
 
     // Check if lock still exists and matches
     const checkStmt = this.db!.prepare(
@@ -164,11 +224,19 @@ export class SQLiteStateAdapter implements StateAdapter {
       | undefined;
 
     if (!existing) {
+      logger.debug(
+        { threadId: lock.threadId, token: lock.token },
+        'SQLiteStateAdapter lock not found for extension',
+      );
       return false; // Lock doesn't exist or token doesn't match
     }
 
     if (existing.expires_at < Date.now()) {
       // Lock has already expired, clean it up
+      logger.debug(
+        { threadId: lock.threadId, token: lock.token },
+        'SQLiteStateAdapter lock expired, cleaning up',
+      );
       const deleteStmt = this.db!.prepare(
         `DELETE FROM chat_sdk_locks WHERE thread_id = ?`,
       );
@@ -183,11 +251,16 @@ export class SQLiteStateAdapter implements StateAdapter {
     );
     updateStmt.run(newExpiresAt, lock.threadId, lock.token);
 
+    logger.debug(
+      { threadId: lock.threadId, token: lock.token, newExpiresAt },
+      'SQLiteStateAdapter lock extended',
+    );
     return true;
   }
 
   async get<T = unknown>(key: string): Promise<T | null> {
     this.ensureConnected();
+    logger.debug({ key }, 'SQLiteStateAdapter getting cache value');
 
     const stmt = this.db!.prepare(
       `SELECT value, expires_at FROM chat_sdk_cache WHERE key = ?`,
@@ -197,11 +270,16 @@ export class SQLiteStateAdapter implements StateAdapter {
       | undefined;
 
     if (!result) {
+      logger.debug({ key }, 'SQLiteStateAdapter cache key not found');
       return null;
     }
 
     // Check if expired
     if (result.expires_at !== null && result.expires_at <= Date.now()) {
+      logger.debug(
+        { key, expiresAt: result.expires_at },
+        'SQLiteStateAdapter cache key expired, deleting',
+      );
       const deleteStmt = this.db!.prepare(
         `DELETE FROM chat_sdk_cache WHERE key = ?`,
       );
@@ -210,33 +288,56 @@ export class SQLiteStateAdapter implements StateAdapter {
     }
 
     try {
-      return JSON.parse(result.value) as T;
+      const parsed = JSON.parse(result.value) as T;
+      logger.debug(
+        { key, valueType: typeof parsed },
+        'SQLiteStateAdapter cache value retrieved',
+      );
+      return parsed;
     } catch {
+      logger.debug(
+        { key },
+        'SQLiteStateAdapter cache value returned as string',
+      );
       return result.value as unknown as T;
     }
   }
 
   async set<T = unknown>(key: string, value: T, ttlMs?: number): Promise<void> {
     this.ensureConnected();
-
     const serialized = JSON.stringify(value);
     const expiresAt = ttlMs ? Date.now() + ttlMs : null;
+
+    logger.debug(
+      { key, hasTtl: !!ttlMs, expiresAt, valueLength: serialized.length },
+      'SQLiteStateAdapter setting cache value',
+    );
 
     const stmt = this.db!.prepare(
       `INSERT OR REPLACE INTO chat_sdk_cache (key, value, expires_at) VALUES (?, ?, ?)`,
     );
     stmt.run(key, serialized, expiresAt);
+    logger.debug({ key }, 'SQLiteStateAdapter cache value set');
   }
 
   async delete(key: string): Promise<void> {
     this.ensureConnected();
+    logger.debug({ key }, 'SQLiteStateAdapter deleting cache value');
 
     const stmt = this.db!.prepare(`DELETE FROM chat_sdk_cache WHERE key = ?`);
-    stmt.run(key);
+    const result = stmt.run(key);
+    logger.debug(
+      { key, changes: result.changes },
+      'SQLiteStateAdapter cache value deleted',
+    );
   }
 
   private ensureConnected(): void {
     if (!this.connected || !this.db) {
+      logger.error(
+        { connected: this.connected, hasDb: !!this.db },
+        'SQLiteStateAdapter operation attempted while not connected',
+      );
       throw new Error(
         'SQLiteStateAdapter is not connected. Call connect() first.',
       );
@@ -247,7 +348,13 @@ export class SQLiteStateAdapter implements StateAdapter {
     const stmt = this.db!.prepare(
       `DELETE FROM chat_sdk_locks WHERE expires_at <= ?`,
     );
-    stmt.run(Date.now());
+    const result = stmt.run(Date.now());
+    if (result.changes > 0) {
+      logger.debug(
+        { deletedLocks: result.changes },
+        'SQLiteStateAdapter cleaned up expired locks',
+      );
+    }
   }
 
   private cleanupExpired(): void {
@@ -257,13 +364,20 @@ export class SQLiteStateAdapter implements StateAdapter {
     const lockStmt = this.db!.prepare(
       `DELETE FROM chat_sdk_locks WHERE expires_at <= ?`,
     );
-    lockStmt.run(now);
+    const lockResult = lockStmt.run(now);
 
     // Clean expired cache entries
     const cacheStmt = this.db!.prepare(
       `DELETE FROM chat_sdk_cache WHERE expires_at IS NOT NULL AND expires_at <= ?`,
     );
-    cacheStmt.run(now);
+    const cacheResult = cacheStmt.run(now);
+
+    if (lockResult.changes > 0 || cacheResult.changes > 0) {
+      logger.debug(
+        { deletedLocks: lockResult.changes, deletedCache: cacheResult.changes },
+        'SQLiteStateAdapter cleaned up expired items',
+      );
+    }
   }
 
   // Utility methods for debugging/monitoring
@@ -294,6 +408,32 @@ export class SQLiteStateAdapter implements StateAdapter {
     );
     const result = stmt.get(Date.now()) as { count: number };
     return result.count;
+  }
+
+  /**
+   * Force release a lock by threadId only (no token check).
+   * Use this only for cleanup of stuck locks.
+   */
+  forceReleaseLock(threadId: string): boolean {
+    this.ensureConnected();
+    logger.warn(
+      { threadId },
+      'SQLiteStateAdapter force releasing lock (no token check)',
+    );
+
+    const stmt = this.db!.prepare(
+      `DELETE FROM chat_sdk_locks WHERE thread_id = ?`,
+    );
+    const result = stmt.run(threadId);
+
+    if (result.changes > 0) {
+      logger.info(
+        { threadId, deletedLocks: result.changes },
+        'SQLiteStateAdapter force released lock',
+      );
+      return true;
+    }
+    return false;
   }
 }
 

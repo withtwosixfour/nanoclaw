@@ -14,6 +14,7 @@ import { resolveAgentId } from './router.js';
 import {
   storeMessage,
   storeAttachment,
+  storeChatMetadata,
   initDatabase,
   getAllAgents,
   getAllSessions,
@@ -286,19 +287,100 @@ function handleIncomingMessage(
     createdAt: string;
   }>,
 ): void {
-  storeMessage({
-    id: messageId,
-    chat_jid: chatJid,
-    sender,
-    sender_name: senderName,
-    content,
-    timestamp,
-    is_from_me: false,
-  });
+  logger.debug(
+    {
+      chatJid,
+      messageId,
+      sender,
+      contentLength: content.length,
+      attachmentCount: attachments?.length ?? 0,
+    },
+    'handleIncomingMessage: Processing message',
+  );
+
+  // First, ensure the chat exists in the database (required for foreign key constraint)
+  try {
+    logger.debug(
+      { chatJid, timestamp },
+      'handleIncomingMessage: Ensuring chat exists',
+    );
+    storeChatMetadata(chatJid, timestamp, senderName, 'discord', true);
+    logger.debug({ chatJid }, 'handleIncomingMessage: Chat metadata stored');
+  } catch (err) {
+    logger.error(
+      {
+        chatJid,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      },
+      'handleIncomingMessage: Failed to store chat metadata',
+    );
+    throw err;
+  }
+
+  // Store the message
+  try {
+    logger.debug(
+      {
+        chatJid,
+        messageId,
+        sender,
+        contentLength: content.length,
+        attachmentCount: attachments?.length ?? 0,
+      },
+      'handleIncomingMessage: Storing message',
+    );
+    storeMessage({
+      id: messageId,
+      chat_jid: chatJid,
+      sender,
+      sender_name: senderName,
+      content,
+      timestamp,
+      is_from_me: false,
+    });
+    logger.debug(
+      { chatJid, messageId },
+      'handleIncomingMessage: Message stored',
+    );
+  } catch (err) {
+    logger.error(
+      {
+        chatJid,
+        messageId,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      },
+      'handleIncomingMessage: Failed to store message',
+    );
+    throw err;
+  }
 
   if (attachments && attachments.length > 0) {
+    logger.debug(
+      { chatJid, messageId, attachmentCount: attachments.length },
+      'handleIncomingMessage: Storing attachments',
+    );
     for (const att of attachments) {
-      storeAttachment(att, messageId, chatJid);
+      try {
+        storeAttachment(att, messageId, chatJid);
+        logger.debug(
+          { chatJid, messageId, attachmentId: att.id, filename: att.filename },
+          'handleIncomingMessage: Attachment stored',
+        );
+      } catch (err) {
+        logger.error(
+          {
+            chatJid,
+            messageId,
+            attachmentId: att.id,
+            filename: att.filename,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          'handleIncomingMessage: Failed to store attachment',
+        );
+        throw err;
+      }
     }
   }
 
@@ -496,6 +578,31 @@ Add this to your \`ROUTES\` in \`src/router.ts\`:
 }
 
 /**
+ * Safely execute a handler function, catching and logging any errors.
+ * This prevents errors from bubbling up to the Chat SDK, which would
+ * prevent proper lock release in the Discord adapter.
+ */
+async function safeHandler<T extends unknown[]>(
+  handlerName: string,
+  handler: (...args: T) => Promise<void>,
+  ...args: T
+): Promise<void> {
+  try {
+    await handler(...args);
+  } catch (err) {
+    logger.error(
+      {
+        handler: handlerName,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      },
+      'Handler error caught and suppressed to prevent lock issues',
+    );
+    // Error is suppressed - do not re-throw to allow Chat SDK to release lock
+  }
+}
+
+/**
  * Create and configure the Chat SDK bot
  */
 export async function createChatSdkBot(): Promise<Chat> {
@@ -538,60 +645,77 @@ export async function createChatSdkBot(): Promise<Chat> {
   });
 
   bot.onNewMention(async (thread, message) => {
-    const agent = resolveAgentForJid(thread.id);
+    await safeHandler(
+      'onNewMention',
+      async (thread, message) => {
+        const agent = resolveAgentForJid(thread.id);
 
-    if (!agent) {
-      logger.info(
-        { threadId: thread.id },
-        'Channel not routed; ignoring mention',
-      );
-      return;
-    }
-
-    // Subscribe to thread for follow-up messages
-    await thread.subscribe();
-
-    // Add acknowledgement reaction
-    await addAcknowledgement(thread, message.id, thread.id);
-
-    // Process attachments from Chat SDK message
-    let content = message.text || '';
-    let savedAttachments: InternalAttachment[] = [];
-
-    if (message.attachments && message.attachments.length > 0) {
-      logger.info(
-        { threadId: thread.id, attachmentCount: message.attachments.length },
-        'Processing attachments from mention',
-      );
-
-      const { savedAttachments: attachments, mediaNotes } =
-        await processChatSdkAttachments(message.attachments);
-      savedAttachments = attachments;
-
-      // Append media notes to content
-      if (mediaNotes.length > 0) {
-        if (content) {
-          content = `${content}\n\n${mediaNotes.join('\n')}`;
-        } else {
-          content = mediaNotes.join('\n');
+        if (!agent) {
+          logger.info(
+            { threadId: thread.id },
+            'Channel not routed; ignoring mention',
+          );
+          return;
         }
-      }
-    }
 
-    // Store the message
-    handleIncomingMessage(
-      thread.id,
-      message.id,
-      message.author?.userId || 'unknown',
-      message.author?.userName || 'Unknown',
-      content,
-      message.metadata?.dateSent?.toISOString() || new Date().toISOString(),
-      savedAttachments,
+        // Subscribe to thread for follow-up messages
+        await thread.subscribe();
+
+        // Add acknowledgement reaction
+        await addAcknowledgement(thread, message.id, thread.id);
+
+        // Process attachments from Chat SDK message
+        let content = message.text || '';
+        let savedAttachments: InternalAttachment[] = [];
+
+        if (message.attachments && message.attachments.length > 0) {
+          logger.info(
+            {
+              threadId: thread.id,
+              attachmentCount: message.attachments.length,
+            },
+            'Processing attachments from mention',
+          );
+
+          const { savedAttachments: attachments, mediaNotes } =
+            await processChatSdkAttachments(message.attachments);
+          savedAttachments = attachments;
+
+          // Append media notes to content
+          if (mediaNotes.length > 0) {
+            if (content) {
+              content = `${content}\n\n${mediaNotes.join('\n')}`;
+            } else {
+              content = mediaNotes.join('\n');
+            }
+          }
+        }
+
+        // Store the message
+        handleIncomingMessage(
+          thread.id,
+          message.id,
+          message.author?.userId || 'unknown',
+          message.author?.userName || 'Unknown',
+          content,
+          message.metadata?.dateSent?.toISOString() || new Date().toISOString(),
+          savedAttachments,
+        );
+
+        // Run agent
+        const sessionId = ensureSessionForThread(thread.id);
+        await runAgent(
+          thread.id,
+          agent,
+          content,
+          sessionId,
+          thread,
+          message.id,
+        );
+      },
+      thread,
+      message,
     );
-
-    // Run agent
-    const sessionId = ensureSessionForThread(thread.id);
-    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
   });
 
   // Handle subscribed messages (follow-ups in same thread)
