@@ -12,7 +12,7 @@ import {
   setRoute,
 } from '../../db.js';
 import { Agent } from '../../types.js';
-import { resolveAgentId, setRouteInMemory, isNoReply } from '../../router.js';
+import { resolveAgentId, isNoReply } from '../../router.js';
 
 export interface NanoClawContext {
   chatJid: string;
@@ -291,7 +291,6 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         }
 
         // Add route in-memory and persist to database
-        setRouteInMemory(input.jid, input.agent_id);
         setRoute(input.jid, input.agent_id);
         return {
           ok: true,

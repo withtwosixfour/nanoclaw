@@ -1,24 +1,7 @@
 import path from 'path';
 import { AGENTS_DIR, SESSIONS_DIR } from './config.js';
 import { Channel, NewMessage } from './types.js';
-
-// Database-backed routes (populated from DB on startup)
-// Format: threadIdPattern -> agentId
-// Supports multi-platform routing:
-//   - Exact: 'discord:123:456' -> 'main'
-//   - Guild wildcard: 'discord:123:*' -> 'support-agent' (all channels in guild)
-//   - Platform wildcard: 'discord:*' -> 'discord-bot' (all Discord channels)
-//   - Cross-platform: '*' -> 'universal-agent' (all channels on all platforms)
-//   - Legacy: 'dc:123' -> 'main' (backward compatible)
-let dbRoutes: Record<string, string> = {};
-
-/**
- * Load routes from database into memory.
- * Called during startup after database initialization.
- */
-export function loadRoutesFromDb(routes: Record<string, string>): void {
-  dbRoutes = routes;
-}
+import { getAllRoutes } from './db.js';
 
 /**
  * Convert a glob pattern to a regex.
@@ -134,6 +117,7 @@ export function parseThreadId(threadId: string): {
  * Also handles legacy formats: dc:... (auto-converted to discord::...)
  */
 export function resolveAgentId(threadId: string): string | null {
+  const dbRoutes = getAllRoutes();
   // Fast path: exact match on full thread ID
   if (dbRoutes[threadId]) return dbRoutes[threadId];
 
@@ -170,29 +154,6 @@ export function resolveAgentId(threadId: string): string | null {
   }
 
   return null;
-}
-
-/**
- * Get all routed JIDs (in-memory cache loaded from DB).
- */
-export function getRouteJids(): string[] {
-  return Object.keys(dbRoutes);
-}
-
-/**
- * Update the in-memory route cache.
- * Note: This only updates memory. To persist, use setRoute() from db.ts.
- */
-export function setRouteInMemory(jid: string, agentId: string): void {
-  dbRoutes[jid] = agentId;
-}
-
-/**
- * Remove a route from the in-memory cache.
- * Note: This only updates memory. To persist, use deleteRoute() from db.ts.
- */
-export function deleteRouteInMemory(jid: string): void {
-  delete dbRoutes[jid];
 }
 
 /**

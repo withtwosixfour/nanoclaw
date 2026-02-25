@@ -1,5 +1,7 @@
 import type { Lock, StateAdapter } from 'chat';
 import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
 
 interface SQLiteLock extends Lock {
   expiresAt: number;
@@ -29,6 +31,10 @@ export class SQLiteStateAdapter implements StateAdapter {
     if (this.connected) {
       return;
     }
+
+    // Ensure the directory exists before creating the database
+    const dir = path.dirname(this.dbPath);
+    fs.mkdirSync(dir, { recursive: true });
 
     // Use better-sqlite3 (synchronous API, but wrapped in async for interface compatibility)
     this.db = new Database(this.dbPath);

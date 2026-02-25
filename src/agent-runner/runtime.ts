@@ -247,7 +247,6 @@ async function runQuery(
   prompt: string,
   sessionId: string,
   input: AgentInput,
-  secrets: AgentSecrets,
   deps: AgentRuntimeDeps,
 ): Promise<{
   newSessionId: string;
@@ -272,7 +271,7 @@ async function runQuery(
     'Starting model query',
   );
 
-  const model = createModel(config.provider, config.modelName, secrets);
+  const model = createModel(config.provider, config.modelName);
 
   const systemPrompt = buildSystemPrompt(input.agentId, input.isMain);
   const routeInfo = getRouteInfo(input.chatJid);
@@ -579,7 +578,6 @@ async function maybeCompactSession(
   input: AgentInput,
   sessionId: string,
   usageTokens: number,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
@@ -609,7 +607,7 @@ async function maybeCompactSession(
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
-  await compactSession(input, sessionId, secrets);
+  await compactSession(input, sessionId);
   activeCompactions.delete(sessionId);
 }
 
@@ -617,7 +615,6 @@ async function maybeCompactSessionPreflight(
   input: AgentInput,
   sessionId: string,
   promptText: string,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
@@ -679,14 +676,13 @@ async function maybeCompactSessionPreflight(
   if (totalEstimatedTokens < threshold) return;
 
   activeCompactions.add(sessionId);
-  await compactSession(input, sessionId, secrets);
+  await compactSession(input, sessionId);
   activeCompactions.delete(sessionId);
 }
 
 async function compactSession(
   input: AgentInput,
   sessionId: string,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const compactionStart = Date.now();
   logger.info(
@@ -744,7 +740,7 @@ async function compactSession(
     archiveConversation(input.chatJid, sessionId, messages);
 
     const config = getModelConfig(input.modelProvider, input.modelName);
-    const model = createModel(config.provider, config.modelName, secrets);
+    const model = createModel(config.provider, config.modelName);
 
     const summaryPrompt = buildSummaryPrompt(older);
     let summaryText = '';
@@ -1064,7 +1060,6 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
   ): Promise<AgentOutput> => {
     const startTime = Date.now();
     const runId = `${input.agentId}-${startTime}`;
-    const secrets = readSecrets();
 
     logger.info(
       {
@@ -1133,13 +1128,12 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         );
 
         const queryIterationStart = Date.now();
-        await maybeCompactSessionPreflight(input, sessionId, prompt, secrets);
+        await maybeCompactSessionPreflight(input, sessionId, prompt);
 
         const { newSessionId, responseText, usageTokens } = await runQuery(
           prompt,
           sessionId,
           input,
-          secrets,
           deps,
         );
         sessionId = newSessionId;
@@ -1182,7 +1176,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           }
         }
 
-        void maybeCompactSession(input, sessionId, usageTokens, secrets);
+        void maybeCompactSession(input, sessionId, usageTokens);
 
         const nextMessage = await waitForPipeMessage(pipe);
         if (nextMessage === null) {

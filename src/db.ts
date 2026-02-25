@@ -52,7 +52,7 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
-    CREATE INDEX IF NOT EXISTS idx_thread_id ON scheduled_tasks(thread_id);
+    -- Note: idx_thread_id is created after migration below
 
     CREATE TABLE IF NOT EXISTS task_run_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +217,11 @@ function createSchema(database: Database.Database): void {
   try {
     // Add thread_id column if it doesn't exist
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN thread_id TEXT`);
+
+    // Create index for thread_id after column is added
+    database.exec(
+      `CREATE INDEX IF NOT EXISTS idx_thread_id ON scheduled_tasks(thread_id)`,
+    );
 
     // Migrate existing dc: JIDs to discord: format
     database.exec(`

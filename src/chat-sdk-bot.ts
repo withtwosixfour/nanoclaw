@@ -7,15 +7,14 @@ import {
   DISCORD_PUBLIC_KEY,
   DISCORD_APPLICATION_ID,
   DATA_DIR,
-  TRIGGER_PATTERN,
 } from './config.js';
 import { logger } from './logger.js';
-import { resolveAgentId, loadRoutesFromDb } from './router.js';
+import type { Logger as ChatLogger } from 'chat';
+import { resolveAgentId } from './router.js';
 import {
   storeMessage,
   storeAttachment,
   initDatabase,
-  getAllRoutes,
   getAllAgents,
   getAllSessions,
   setAgent,
@@ -28,15 +27,60 @@ import {
   getSessionLastTimestamp,
 } from './agent-runner/session-store.js';
 import { createAgentRuntime, AgentInput } from './agent-runner/runtime.js';
-import type { Agent, Attachment } from './types.js';
+import type { Agent } from './types.js';
 import path from 'path';
 import fs from 'fs';
+import type { Logger as PinoLogger } from 'pino';
+
+// Adapter to wrap pino logger for Chat SDK compatibility
+class PinoLoggerAdapter implements ChatLogger {
+  constructor(
+    private pinoLogger: PinoLogger,
+    private prefix: string = '',
+  ) {}
+
+  child(prefix: string): ChatLogger {
+    const childLogger = this.pinoLogger.child({ component: prefix });
+    return new PinoLoggerAdapter(childLogger, prefix);
+  }
+
+  debug(message: string, ...args: unknown[]): void {
+    if (args.length > 0) {
+      this.pinoLogger.debug({ args, prefix: this.prefix }, message);
+    } else {
+      this.pinoLogger.debug({ prefix: this.prefix }, message);
+    }
+  }
+
+  error(message: string, ...args: unknown[]): void {
+    if (args.length > 0) {
+      this.pinoLogger.error({ args, prefix: this.prefix }, message);
+    } else {
+      this.pinoLogger.error({ prefix: this.prefix }, message);
+    }
+  }
+
+  info(message: string, ...args: unknown[]): void {
+    if (args.length > 0) {
+      this.pinoLogger.info({ args, prefix: this.prefix }, message);
+    } else {
+      this.pinoLogger.info({ prefix: this.prefix }, message);
+    }
+  }
+
+  warn(message: string, ...args: unknown[]): void {
+    if (args.length > 0) {
+      this.pinoLogger.warn({ args, prefix: this.prefix }, message);
+    } else {
+      this.pinoLogger.warn({ prefix: this.prefix }, message);
+    }
+  }
+}
 
 // State management
 let sessions: Record<string, string> = {};
 let agents: Record<string, Agent> = {};
 let lastAgentTimestamp: Record<string, string> = {};
-let lastCommandTimestamp: Record<string, string> = {};
 let botInstance: Chat | null = null;
 
 // Track which messages we're processing (for 👀 reactions)
@@ -59,16 +103,16 @@ function jidToThreadId(jid: string): string {
 }
 
 /**
- * Get or create session for a JID
+ * Get or create session for a channel
  */
-function ensureSessionForJid(chatJid: string): string {
-  if (!sessions[chatJid]) {
-    const agentId = resolveAgentId(chatJid);
+function ensureSessionForThread(threadId: string): string {
+  if (!sessions[threadId]) {
+    const agentId = resolveAgentId(threadId);
     if (agentId) {
-      sessions[chatJid] = getOrCreateSessionId(chatJid, agentId);
+      sessions[threadId] = getOrCreateSessionId(threadId, agentId);
     }
   }
-  return sessions[chatJid];
+  return sessions[threadId];
 }
 
 /**
@@ -172,7 +216,7 @@ function handleIncomingMessage(
     }
   }
 
-  ensureSessionForJid(chatJid);
+  ensureSessionForThread(chatJid);
 }
 
 /**
@@ -183,7 +227,7 @@ async function runAgent(
   agent: Agent,
   prompt: string,
   sessionId: string,
-  thread: any,
+  thread: Thread,
   messageId: string,
 ): Promise<void> {
   const input: AgentInput = {
@@ -320,14 +364,6 @@ export async function createChatSdkBot(): Promise<Chat> {
   initDatabase();
   logger.info('Database initialized');
 
-  // Load routes
-  const dbRoutes = getAllRoutes();
-  loadRoutesFromDb(dbRoutes);
-  logger.info(
-    { routeCount: Object.keys(dbRoutes).length },
-    'Routes loaded from database',
-  );
-
   // Load state
   const sessionData = getAllSessions();
   for (const [jid, data] of Object.entries(sessionData)) {
@@ -347,52 +383,21 @@ export async function createChatSdkBot(): Promise<Chat> {
   const state = createSQLiteState(path.join(DATA_DIR, 'nanoclaw.db'));
   await state.connect();
 
-  // Build adapters object based on available credentials
-  const adapters: Record<string, any> = {};
-
-  // Discord adapter (if token configured)
-  if (DISCORD_BOT_TOKEN) {
-    adapters.discord = createDiscordAdapter({
-      botToken: DISCORD_BOT_TOKEN,
-      publicKey: DISCORD_PUBLIC_KEY,
-      applicationId: DISCORD_APPLICATION_ID,
-    });
-    logger.info('Discord adapter initialized');
-  } else {
-    logger.warn('DISCORD_BOT_TOKEN not set - Discord adapter disabled');
-  }
-
-  // NOTE: Add other adapters here when you install their packages:
-  // if (SLACK_BOT_TOKEN) {
-  //   adapters.slack = createSlackAdapter({
-  //     botToken: SLACK_BOT_TOKEN,
-  //     signingSecret: SLACK_SIGNING_SECRET,
-  //   });
-  // }
-  //
-  // if (TEAMS_APP_ID) {
-  //   adapters.teams = createTeamsAdapter({
-  //     appId: TEAMS_APP_ID,
-  //     appPassword: TEAMS_APP_PASSWORD,
-  //     tenantId: TEAMS_APP_TENANT_ID,
-  //   });
-  // }
-
-  if (Object.keys(adapters).length === 0) {
-    throw new Error(
-      'No chat adapters configured. Please set at least one platform token (e.g., DISCORD_BOT_TOKEN)',
-    );
-  }
-
   // Create Chat SDK bot
   const bot = new Chat({
     userName: ASSISTANT_NAME.toLowerCase(),
-    adapters,
+    adapters: {
+      discord: createDiscordAdapter({
+        botToken: DISCORD_BOT_TOKEN,
+        publicKey: DISCORD_PUBLIC_KEY,
+        applicationId: DISCORD_APPLICATION_ID,
+        logger: new PinoLoggerAdapter(logger),
+      }),
+    },
     state,
-    // logger: 'info', // Use default ConsoleLogger
+    logger: new PinoLoggerAdapter(logger),
   });
 
-  // Handle new mentions (@bot)
   bot.onNewMention(async (thread, message) => {
     const agent = resolveAgentForJid(thread.id);
 
@@ -407,15 +412,6 @@ export async function createChatSdkBot(): Promise<Chat> {
     // Subscribe to thread for follow-up messages
     await thread.subscribe();
 
-    // Get content and inject trigger if needed
-    let content = message.text || '';
-
-    // Check if bot was mentioned and inject trigger if needed
-    // Chat SDK passes us the message already, but we need to ensure trigger is present
-    if (!TRIGGER_PATTERN.test(content)) {
-      content = `@${ASSISTANT_NAME} ${content}`;
-    }
-
     // Add acknowledgement reaction
     await addAcknowledgement(thread, message.id, thread.id);
 
@@ -425,14 +421,21 @@ export async function createChatSdkBot(): Promise<Chat> {
       message.id,
       message.author?.userId || 'unknown',
       message.author?.userName || 'Unknown',
-      content,
+      message.text,
       message.metadata?.dateSent?.toISOString() || new Date().toISOString(),
       // TODO: Handle attachments
     );
 
     // Run agent
-    const sessionId = ensureSessionForJid(thread.id);
-    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
+    const sessionId = ensureSessionForThread(thread.id);
+    await runAgent(
+      thread.id,
+      agent,
+      message.text,
+      sessionId,
+      thread,
+      message.id,
+    );
   });
 
   // Handle subscribed messages (follow-ups in same thread)
@@ -475,30 +478,33 @@ export async function createChatSdkBot(): Promise<Chat> {
     );
 
     // Run agent
-    const sessionId = ensureSessionForJid(thread.id);
+    const sessionId = ensureSessionForThread(thread.id);
     await runAgent(thread.id, agent, content, sessionId, thread, message.id);
   });
 
   // Handle ALL messages in unsubscribed threads (catch-all)
   bot.onNewMessage(/.*/, async (thread, message) => {
     // Skip if already subscribed (onSubscribedMessage will handle it)
-    if (await thread.isSubscribed()) return;
+    if (await thread.isSubscribed()) {
+      logger.info(
+        { threadId: thread.id },
+        'Skipping message - already subscribed',
+      );
+      return;
+    }
 
     const agent = resolveAgentForJid(thread.id);
 
     if (!agent) {
-      // Channel not routed - ignore
+      logger.info(
+        { threadId: thread.id },
+        'Channel not routed; ignoring message',
+      );
       return;
     }
 
     // Subscribe to this thread so future messages go to onSubscribedMessage
     await thread.subscribe();
-
-    // Get content and inject trigger if needed
-    let content = message.text || '';
-    if (!TRIGGER_PATTERN.test(content)) {
-      content = `@${ASSISTANT_NAME} ${content}`;
-    }
 
     // Add acknowledgement reaction
     await addAcknowledgement(thread, message.id, thread.id);
@@ -509,13 +515,21 @@ export async function createChatSdkBot(): Promise<Chat> {
       message.id,
       message.author?.userId || 'unknown',
       message.author?.userName || 'Unknown',
-      content,
+      message.text,
       message.metadata?.dateSent?.toISOString() || new Date().toISOString(),
     );
 
     // Run agent
-    const sessionId = ensureSessionForJid(thread.id);
-    await runAgent(thread.id, agent, content, sessionId, thread, message.id);
+    const sessionId = ensureSessionForThread(thread.id);
+
+    await runAgent(
+      thread.id,
+      agent,
+      message.text,
+      sessionId,
+      thread,
+      message.id,
+    );
   });
 
   // Handle slash commands
@@ -538,6 +552,17 @@ export async function createChatSdkBot(): Promise<Chat> {
     const response = await executeCommand(channel.id, 'update', user.userId);
     await channel.post(response);
   });
+
+  await bot.initialize();
+
+  bot
+    .getAdapter('discord')
+    .startGatewayListener(
+      { waitUntil: (promise) => promise },
+      Infinity,
+      undefined,
+      undefined,
+    );
 
   // Store the bot instance for use by other modules
   botInstance = bot;

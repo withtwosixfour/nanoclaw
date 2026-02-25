@@ -12,6 +12,7 @@ import { logger } from './logger.js';
 import { formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { GroupQueue } from './group-queue.js';
+import { initDatabase } from './db.js';
 import {
   AgentOutput,
   AgentInput,
@@ -26,6 +27,7 @@ export { escapeXml, formatMessages } from './router.js';
 const queue = new GroupQueue();
 
 // Create agent runtime that sends messages via Chat SDK
+logger.info('Initializing agent runtime with Chat SDK message handler');
 const agentRuntime = createAgentRuntime({
   sendMessage: async (jid, text) => {
     try {
@@ -50,6 +52,10 @@ async function main(): Promise<void> {
   // Log startup
   console.log('\n  NanoClaw Chat SDK Bot started');
   console.log('  Event-driven mode - no polling loop\n');
+
+  // Initialize database first (required by scheduler)
+  initDatabase();
+  logger.info('Database initialized');
 
   // Start scheduler loop for background tasks
   startSchedulerLoop({
@@ -132,6 +138,10 @@ async function main(): Promise<void> {
 
   // Keep the process running
   // The Chat SDK maintains connections via Gateway or HTTP
+  logger.info('Initializing bot');
+
+  await createChatSdkBot();
+
   logger.info('Bot is running. Waiting for events...');
 }
 
