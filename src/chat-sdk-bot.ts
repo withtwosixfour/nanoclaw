@@ -32,7 +32,6 @@ import { saveAttachment, buildMediaNote } from './attachments/store.js';
 import { getMimeTypeFromExtension } from './attachments/images.js';
 import path from 'path';
 import fs from 'fs';
-import crypto from 'crypto';
 import type { Logger as PinoLogger } from 'pino';
 
 // Adapter to wrap pino logger for Chat SDK compatibility
@@ -374,20 +373,6 @@ async function runAgent(
                 },
               ],
             });
-
-            // Store outgoing attachment metadata
-            const outgoingAttachment: InternalAttachment = {
-              id: crypto.randomUUID(),
-              filename,
-              path: pendingAtt.filePath,
-              mimeType,
-              size: fileBuffer.length,
-              createdAt: new Date().toISOString(),
-            };
-
-            // Generate a unique message ID for the outgoing attachment
-            const attachmentMessageId = `out-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-            storeAttachment(outgoingAttachment, attachmentMessageId, chatJid);
 
             logger.info(
               {
