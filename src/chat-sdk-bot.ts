@@ -134,29 +134,30 @@ function resolveAgentForJid(chatJid: string): Agent | null {
  * Add 👀 reaction to show we're processing
  */
 async function addAcknowledgement(
-  thread: any,
+  thread: Thread,
   messageId: string,
-  chatJid: string,
 ): Promise<void> {
   try {
     // React with 👀 using the thread's raw adapter if available
     // The Discord adapter exposes methods through the adapter property
-    const adapter = (thread as any).adapter;
-    if (adapter && typeof adapter.addReaction === 'function') {
-      await adapter.addReaction(thread.id, messageId, '👀');
-    }
+    const adapter = thread.adapter;
+
+    await adapter.addReaction(thread.id, messageId, '👀');
 
     // Set safety timeout to auto-remove after 5 minutes
     const timeout = setTimeout(
       () => {
-        clearAcknowledgement(thread, messageId, chatJid);
+        clearAcknowledgement(thread, messageId);
       },
       5 * 60 * 1000,
     );
 
-    processingMessages.set(chatJid, { messageId, timeout });
+    processingMessages.set(thread.id, { messageId, timeout });
   } catch (err) {
-    logger.debug({ chatJid, err }, 'Failed to add acknowledgement reaction');
+    logger.error(
+      { threadId: thread.id, messageId, err },
+      'Failed to add acknowledgement reaction',
+    );
   }
 }
 
@@ -164,24 +165,24 @@ async function addAcknowledgement(
  * Clear 👀 reaction
  */
 async function clearAcknowledgement(
-  thread: any,
+  thread: Thread,
   messageId: string,
-  chatJid: string,
 ): Promise<void> {
-  const entry = processingMessages.get(chatJid);
+  const entry = processingMessages.get(thread.id);
   if (!entry) return;
 
   clearTimeout(entry.timeout);
 
   try {
-    const adapter = (thread as any).adapter;
-    if (adapter && typeof adapter.removeReaction === 'function') {
-      await adapter.removeReaction(thread.id, messageId, '👀');
-    }
+    const adapter = thread.adapter;
+    await adapter.removeReaction(thread.id, messageId, '👀');
   } catch (err) {
-    logger.debug({ chatJid, err }, 'Failed to clear acknowledgement reaction');
+    logger.debug(
+      { threadId: thread.id, messageId, err },
+      'Failed to clear acknowledgement reaction',
+    );
   } finally {
-    processingMessages.delete(chatJid);
+    processingMessages.delete(thread.id);
   }
 }
 
@@ -414,7 +415,7 @@ async function runAgent(
 
     if (output.status === 'success' && output.result) {
       // Clear acknowledgement before sending
-      await clearAcknowledgement(thread, messageId, chatJid);
+      await clearAcknowledgement(thread, messageId);
 
       // Send the response
       await thread.post(output.result);
@@ -422,7 +423,7 @@ async function runAgent(
       // Update timestamp
       lastAgentTimestamp[chatJid] = new Date().toISOString();
     } else if (output.status === 'error') {
-      await clearAcknowledgement(thread, messageId, chatJid);
+      await clearAcknowledgement(thread, messageId);
       logger.error({ chatJid, error: output.error }, 'Agent error');
       await thread.post(
         'Sorry, I encountered an error processing your request.',
@@ -482,7 +483,7 @@ async function runAgent(
       }
     }
   } catch (err) {
-    await clearAcknowledgement(thread, messageId, chatJid);
+    await clearAcknowledgement(thread, messageId);
     logger.error({ chatJid, err }, 'Failed to run agent');
     await thread.post('Sorry, I encountered an error.');
   }
@@ -640,7 +641,7 @@ export async function createChatSdkBot(): Promise<Chat> {
     await thread.subscribe();
 
     // Add acknowledgement reaction
-    await addAcknowledgement(thread, message.id, thread.id);
+    await addAcknowledgement(thread, message.id);
 
     // Process attachments from Chat SDK message
     let content = message.text || '';
@@ -737,7 +738,7 @@ export async function createChatSdkBot(): Promise<Chat> {
     }
 
     // Add acknowledgement
-    await addAcknowledgement(thread, message.id, thread.id);
+    await addAcknowledgement(thread, message.id);
 
     // Store message
     handleIncomingMessage(
@@ -806,7 +807,7 @@ export async function createChatSdkBot(): Promise<Chat> {
     await thread.subscribe();
 
     // Add acknowledgement reaction
-    await addAcknowledgement(thread, message.id, thread.id);
+    await addAcknowledgement(thread, message.id);
 
     // Process attachments from Chat SDK message
     let content = message.text || '';
