@@ -553,8 +553,6 @@ export async function createChatSdkBot(): Promise<Chat> {
     await channel.post(response);
   });
 
-  await bot.initialize();
-
   bot
     .getAdapter('discord')
     .startGatewayListener(
@@ -563,6 +561,8 @@ export async function createChatSdkBot(): Promise<Chat> {
       undefined,
       undefined,
     );
+
+  await bot.initialize();
 
   // Store the bot instance for use by other modules
   botInstance = bot;
