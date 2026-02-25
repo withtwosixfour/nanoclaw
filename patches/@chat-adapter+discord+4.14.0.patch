@@ -1,0 +1,67 @@
+diff --git a/node_modules/@chat-adapter/discord/dist/index.js b/node_modules/@chat-adapter/discord/dist/index.js
+index e9ed311..800b6fa 100644
+--- a/node_modules/@chat-adapter/discord/dist/index.js
++++ b/node_modules/@chat-adapter/discord/dist/index.js
+@@ -948,15 +948,16 @@ var DiscordAdapter = class {
+    * Add a reaction to a Discord message.
+    */
+   async addReaction(threadId, messageId, emoji) {
+-    const { channelId } = this.decodeThreadId(threadId);
++    const { channelId, threadId: discordThreadId } = this.decodeThreadId(threadId);
++    const targetChannelId = discordThreadId || channelId;
+     const emojiEncoded = this.encodeEmoji(emoji);
+     this.logger.debug("Discord API: PUT reaction", {
+-      channelId,
++      targetChannelId,
+       messageId,
+       emoji: emojiEncoded
+     });
+     await this.discordFetch(
+-      `/channels/${channelId}/messages/${messageId}/reactions/${emojiEncoded}/@me`,
++      `/channels/${targetChannelId}/messages/${messageId}/reactions/${emojiEncoded}/@me`,
+       "PUT"
+     );
+     this.logger.debug("Discord API: PUT reaction response", { ok: true });
+@@ -965,15 +966,16 @@ var DiscordAdapter = class {
+    * Remove a reaction from a Discord message.
+    */
+   async removeReaction(threadId, messageId, emoji) {
+-    const { channelId } = this.decodeThreadId(threadId);
++    const { channelId, threadId: discordThreadId } = this.decodeThreadId(threadId);
++    const targetChannelId = discordThreadId || channelId;
+     const emojiEncoded = this.encodeEmoji(emoji);
+     this.logger.debug("Discord API: DELETE reaction", {
+-      channelId,
++      targetChannelId,
+       messageId,
+       emoji: emojiEncoded
+     });
+     await this.discordFetch(
+-      `/channels/${channelId}/messages/${messageId}/reactions/${emojiEncoded}/@me`,
++      `/channels/${targetChannelId}/messages/${messageId}/reactions/${emojiEncoded}/@me`,
+       "DELETE"
+     );
+     this.logger.debug("Discord API: DELETE reaction response", { ok: true });
+@@ -1307,10 +1309,11 @@ var DiscordAdapter = class {
+     try {
+       await client.login(this.botToken);
+       await new Promise((resolve) => {
+-        const timeout = setTimeout(resolve, durationMs);
++        // If duration is Infinity, never timeout (only resolve via abort signal)
++        const timeout = durationMs === Infinity ? null : setTimeout(resolve, durationMs);
+         if (abortSignal) {
+           if (abortSignal.aborted) {
+-            clearTimeout(timeout);
++            if (timeout) clearTimeout(timeout);
+             resolve();
+             return;
+           }
+@@ -1320,7 +1323,7 @@ var DiscordAdapter = class {
+               this.logger.info(
+                 "Discord Gateway listener received abort signal (new listener started)"
+               );
+-              clearTimeout(timeout);
++              if (timeout) clearTimeout(timeout);
+               resolve();
+             },
+             { once: true }

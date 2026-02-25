@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 
-import { TRIGGER_PATTERN } from './config.js';
 import {
   escapeXml,
   formatMessages,
@@ -104,40 +103,6 @@ describe('formatMessages', () => {
   });
 });
 
-// --- TRIGGER_PATTERN ---
-
-describe('TRIGGER_PATTERN', () => {
-  it('matches @Andy at start of message', () => {
-    expect(TRIGGER_PATTERN.test('@Andy hello')).toBe(true);
-  });
-
-  it('matches case-insensitively', () => {
-    expect(TRIGGER_PATTERN.test('@andy hello')).toBe(true);
-    expect(TRIGGER_PATTERN.test('@ANDY hello')).toBe(true);
-  });
-
-  it('does not match when not at start of message', () => {
-    expect(TRIGGER_PATTERN.test('hello @Andy')).toBe(false);
-  });
-
-  it('does not match partial name like @Andrew (word boundary)', () => {
-    expect(TRIGGER_PATTERN.test('@Andrew hello')).toBe(false);
-  });
-
-  it('matches with word boundary before apostrophe', () => {
-    expect(TRIGGER_PATTERN.test("@Andy's thing")).toBe(true);
-  });
-
-  it('matches @Andy alone (end of string is a word boundary)', () => {
-    expect(TRIGGER_PATTERN.test('@Andy')).toBe(true);
-  });
-
-  it('matches with leading whitespace after trim', () => {
-    // The actual usage trims before testing: TRIGGER_PATTERN.test(m.content.trim())
-    expect(TRIGGER_PATTERN.test('@Andy hey'.trim())).toBe(true);
-  });
-});
-
 // --- Outbound formatting (reasoning tag stripping + prefix) ---
 
 describe('stripReasoningTags', () => {
@@ -181,57 +146,5 @@ describe('formatOutbound', () => {
     expect(
       formatOutbound('<reasoning>thinking</reasoning>The answer is 42'),
     ).toBe('The answer is 42');
-  });
-});
-
-// --- Trigger gating with requiresTrigger flag ---
-
-describe('trigger gating (requiresTrigger interaction)', () => {
-  // Replicates the exact logic from processGroupMessages and startMessageLoop:
-  //   if (!isMainGroup && group.requiresTrigger !== false) { check trigger }
-  function shouldRequireTrigger(
-    isMainGroup: boolean,
-    requiresTrigger: boolean | undefined,
-  ): boolean {
-    return !isMainGroup && requiresTrigger !== false;
-  }
-
-  function shouldProcess(
-    isMainGroup: boolean,
-    requiresTrigger: boolean | undefined,
-    messages: NewMessage[],
-  ): boolean {
-    if (!shouldRequireTrigger(isMainGroup, requiresTrigger)) return true;
-    return messages.some((m) => TRIGGER_PATTERN.test(m.content.trim()));
-  }
-
-  it('main group always processes (no trigger needed)', () => {
-    const msgs = [makeMsg({ content: 'hello no trigger' })];
-    expect(shouldProcess(true, undefined, msgs)).toBe(true);
-  });
-
-  it('main group processes even with requiresTrigger=true', () => {
-    const msgs = [makeMsg({ content: 'hello no trigger' })];
-    expect(shouldProcess(true, true, msgs)).toBe(true);
-  });
-
-  it('non-main group with requiresTrigger=undefined requires trigger (defaults to true)', () => {
-    const msgs = [makeMsg({ content: 'hello no trigger' })];
-    expect(shouldProcess(false, undefined, msgs)).toBe(false);
-  });
-
-  it('non-main group with requiresTrigger=true requires trigger', () => {
-    const msgs = [makeMsg({ content: 'hello no trigger' })];
-    expect(shouldProcess(false, true, msgs)).toBe(false);
-  });
-
-  it('non-main group with requiresTrigger=true processes when trigger present', () => {
-    const msgs = [makeMsg({ content: '@Andy do something' })];
-    expect(shouldProcess(false, true, msgs)).toBe(true);
-  });
-
-  it('non-main group with requiresTrigger=false always processes (no trigger needed)', () => {
-    const msgs = [makeMsg({ content: 'hello no trigger' })];
-    expect(shouldProcess(false, false, msgs)).toBe(true);
   });
 });

@@ -72,18 +72,7 @@ export interface AgentRuntimeDeps {
 }
 
 export interface AgentRuntime {
-  run: (
-    input: AgentInput,
-    onOutput?: (output: AgentOutput) => Promise<void>,
-  ) => Promise<AgentOutput>;
-  pipeMessage: (groupJid: string, text: string) => boolean;
-  close: (groupJid: string) => void;
-}
-
-interface PipeState {
-  queue: string[];
-  waiters: Array<(message: string | null) => void>;
-  closed: boolean;
+  run: (input: AgentInput) => Promise<AgentOutput>;
 }
 
 interface AgentSecrets {
@@ -247,7 +236,6 @@ async function runQuery(
   prompt: string,
   sessionId: string,
   input: AgentInput,
-  secrets: AgentSecrets,
   deps: AgentRuntimeDeps,
 ): Promise<{
   newSessionId: string;
@@ -272,12 +260,12 @@ async function runQuery(
     'Starting model query',
   );
 
-  const model = createModel(config.provider, config.modelName, secrets);
+  const model = createModel(config.provider, config.modelName);
 
   const systemPrompt = buildSystemPrompt(input.agentId, input.isMain);
   const routeInfo = getRouteInfo(input.chatJid);
   const routeContext = routeInfo
-    ? `You are operating in the conversation "${routeInfo.jid}" with agent "${routeInfo.agentId}".`
+    ? `You are operating in the conversation "${routeInfo.threadId}" with agent "${routeInfo.agentId}".`
     : `You are operating in the conversation "${input.chatJid}" with agent "${input.agentId}".`;
   const messages: ModelMessage[] = [];
   if (systemPrompt) {
@@ -552,10 +540,10 @@ async function runQuery(
                 typeof part.output === 'string'
                   ? JSON.parse(part.output)
                   : part.output;
-              if (result && result.success && result.filePath) {
+              if (result && result.value.success && result.value.filePath) {
                 pendingAttachments.push({
-                  filePath: result.filePath,
-                  caption: result.caption || '',
+                  filePath: result.value.filePath,
+                  caption: result.value.caption || '',
                 });
               }
             } catch {
@@ -579,7 +567,6 @@ async function maybeCompactSession(
   input: AgentInput,
   sessionId: string,
   usageTokens: number,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
@@ -609,7 +596,7 @@ async function maybeCompactSession(
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
-  await compactSession(input, sessionId, secrets);
+  await compactSession(input, sessionId);
   activeCompactions.delete(sessionId);
 }
 
@@ -617,7 +604,6 @@ async function maybeCompactSessionPreflight(
   input: AgentInput,
   sessionId: string,
   promptText: string,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
@@ -679,14 +665,13 @@ async function maybeCompactSessionPreflight(
   if (totalEstimatedTokens < threshold) return;
 
   activeCompactions.add(sessionId);
-  await compactSession(input, sessionId, secrets);
+  await compactSession(input, sessionId);
   activeCompactions.delete(sessionId);
 }
 
 async function compactSession(
   input: AgentInput,
   sessionId: string,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const compactionStart = Date.now();
   logger.info(
@@ -744,7 +729,7 @@ async function compactSession(
     archiveConversation(input.chatJid, sessionId, messages);
 
     const config = getModelConfig(input.modelProvider, input.modelName);
-    const model = createModel(config.provider, config.modelName, secrets);
+    const model = createModel(config.provider, config.modelName);
 
     const summaryPrompt = buildSummaryPrompt(older);
     let summaryText = '';
@@ -994,77 +979,10 @@ function isToolResultPart(part: unknown): part is ToolResultPart {
   );
 }
 
-function buildPipeState(): PipeState {
-  return { queue: [], waiters: [], closed: false };
-}
-
-function drainPipe(pipe: PipeState): string[] {
-  if (pipe.queue.length === 0) return [];
-  const messages = pipe.queue.slice();
-  pipe.queue = [];
-  return messages;
-}
-
-function waitForPipeMessage(pipe: PipeState): Promise<string | null> {
-  if (pipe.closed) return Promise.resolve(null);
-  if (pipe.queue.length > 0) {
-    const next = pipe.queue.shift() || null;
-    return Promise.resolve(next);
-  }
-  return new Promise((resolve) => {
-    pipe.waiters.push(resolve);
-  });
-}
-
-function enqueuePipeMessage(pipe: PipeState, message: string): void {
-  if (pipe.closed) return;
-  if (pipe.waiters.length > 0) {
-    const resolve = pipe.waiters.shift();
-    resolve?.(message);
-    return;
-  }
-  pipe.queue.push(message);
-}
-
-function closePipe(pipe: PipeState): void {
-  pipe.closed = true;
-  while (pipe.waiters.length > 0) {
-    const resolve = pipe.waiters.shift();
-    resolve?.(null);
-  }
-  pipe.queue = [];
-}
-
 export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
-  const pipes = new Map<string, PipeState>();
-  const activeRuns = new Set<string>();
-
-  const getPipe = (groupJid: string): PipeState => {
-    let pipe = pipes.get(groupJid);
-    if (!pipe) {
-      pipe = buildPipeState();
-      pipes.set(groupJid, pipe);
-    }
-    return pipe;
-  };
-
-  const pipeMessage = (groupJid: string, text: string): boolean => {
-    if (!activeRuns.has(groupJid)) return false;
-    enqueuePipeMessage(getPipe(groupJid), text);
-    return true;
-  };
-
-  const close = (groupJid: string): void => {
-    closePipe(getPipe(groupJid));
-  };
-
-  const run = async (
-    input: AgentInput,
-    onOutput?: (output: AgentOutput) => Promise<void>,
-  ): Promise<AgentOutput> => {
+  const run = async (input: AgentInput): Promise<AgentOutput> => {
     const startTime = Date.now();
     const runId = `${input.agentId}-${startTime}`;
-    const secrets = readSecrets();
 
     logger.info(
       {
@@ -1096,11 +1014,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     const agentDir = path.join(AGENTS_DIR, input.agentId);
     fs.mkdirSync(agentDir, { recursive: true });
 
-    const pipe = getPipe(input.chatJid);
-    pipe.closed = false;
-    activeRuns.add(input.chatJid);
-
-    let sessionId =
+    const sessionId =
       input.sessionId || getOrCreateSessionId(input.chatJid, input.agentId);
     let prompt = input.prompt;
     if (input.isScheduledTask) {
@@ -1109,117 +1023,18 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         prompt;
     }
 
-    const pending = drainPipe(pipe);
-    if (pending.length > 0) {
-      logger.debug(
-        { runId, agent: input.agentId, count: pending.length },
-        'Draining pending piped messages into initial prompt',
-      );
-      prompt += '\n' + pending.join('\n');
-    }
-
-    // Track the last response in case we need it on error
-    let lastResponse: string | null = null;
-    let hadError = false;
-    let errorMessage = '';
-    let queryCount = 0;
-
     try {
-      while (true) {
-        queryCount++;
-        logger.info(
-          { runId, agent: input.agentId, sessionId, queryCount },
-          'Starting agent query iteration',
-        );
+      await maybeCompactSessionPreflight(input, sessionId, prompt);
 
-        const queryIterationStart = Date.now();
-        await maybeCompactSessionPreflight(input, sessionId, prompt, secrets);
+      const { responseText, usageTokens, pendingAttachments } = await runQuery(
+        prompt,
+        sessionId,
+        input,
+        deps,
+      );
 
-        const { newSessionId, responseText, usageTokens } = await runQuery(
-          prompt,
-          sessionId,
-          input,
-          secrets,
-          deps,
-        );
-        sessionId = newSessionId;
-
-        const queryIterationDuration = Date.now() - queryIterationStart;
-        logger.info(
-          {
-            runId,
-            agent: input.agentId,
-            sessionId,
-            queryCount,
-            queryDurationMs: queryIterationDuration,
-            responseLength: responseText.length,
-            usageTokens,
-          },
-          'Query iteration completed',
-        );
-
-        // Store this response and emit it immediately
-        if (responseText) {
-          lastResponse = responseText;
-          if (onOutput) {
-            logger.debug(
-              {
-                runId,
-                agent: input.agentId,
-                responseLength: responseText.length,
-              },
-              'Calling onOutput callback with response',
-            );
-            await onOutput({
-              status: 'success',
-              result: responseText,
-              newSessionId: sessionId,
-            });
-            logger.debug(
-              { runId, agent: input.agentId },
-              'onOutput callback completed',
-            );
-          }
-        }
-
-        void maybeCompactSession(input, sessionId, usageTokens, secrets);
-
-        const nextMessage = await waitForPipeMessage(pipe);
-        if (nextMessage === null) {
-          logger.info(
-            {
-              runId,
-              agent: input.agentId,
-              durationMs: Date.now() - startTime,
-              queryCount,
-            },
-            'Agent run closed - no more piped messages',
-          );
-          break;
-        }
-        prompt = nextMessage;
-        logger.debug(
-          {
-            runId,
-            agent: input.agentId,
-            nextMessageLength: nextMessage.length,
-          },
-          'Received piped message for next iteration',
-        );
-      }
-
-      // Send completion marker
-      if (onOutput) {
-        logger.debug(
-          { runId, agent: input.agentId },
-          'Sending completion marker',
-        );
-        await onOutput({
-          status: 'success',
-          result: null,
-          newSessionId: sessionId,
-        });
-      }
+      // Trigger compaction asynchronously after response
+      void maybeCompactSession(input, sessionId, usageTokens);
 
       const totalDuration = Date.now() - startTime;
       logger.info(
@@ -1227,66 +1042,42 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           runId,
           agent: input.agentId,
           totalDurationMs: totalDuration,
-          queryCount,
-          finalSessionId: sessionId,
-          resultLength: lastResponse?.length || 0,
+          responseLength: responseText.length,
+          sessionId,
         },
         'Agent run completed successfully',
       );
 
       return {
         status: 'success',
-        result: lastResponse,
+        result: responseText,
         newSessionId: sessionId,
+        pendingAttachments,
       };
     } catch (err) {
-      errorMessage = err instanceof Error ? err.message : String(err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
       const errorStack = err instanceof Error ? err.stack : undefined;
-      hadError = true;
+
       logger.error(
         {
           runId,
           agent: input.agentId,
           error: errorMessage,
           stack: errorStack,
-          queryCount,
           durationMs: Date.now() - startTime,
           sessionId,
         },
         'Agent run error',
       );
-    } finally {
-      activeRuns.delete(input.chatJid);
-      closePipe(pipe);
-      logger.debug(
-        { runId, agent: input.agentId, activeRunsCount: activeRuns.size },
-        'Cleaned up agent run',
-      );
-    }
 
-    // Handle error case - send the last response we got before the error
-    if (hadError) {
-      const output: AgentOutput = {
+      return {
         status: 'error',
-        result: lastResponse,
+        result: null,
         newSessionId: sessionId,
         error: errorMessage,
       };
-      logger.info(
-        { runId, agent: input.agentId, hasPartialResult: !!lastResponse },
-        'Sending error output with partial result',
-      );
-      if (onOutput) await onOutput(output);
-      return output;
     }
-
-    // This line is unreachable but satisfies TypeScript
-    return {
-      status: 'success',
-      result: null,
-      newSessionId: sessionId,
-    };
   };
 
-  return { run, pipeMessage, close };
+  return { run };
 }
