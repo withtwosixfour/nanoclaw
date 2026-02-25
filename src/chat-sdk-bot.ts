@@ -925,10 +925,8 @@ export async function sendMessageToJid(
       throw new Error(`No adapter for platform: ${platform}`);
     }
 
-    // Post message using adapter's API
-    const adapterAny = adapter as any;
-    if (adapterAny.postMessage) {
-      await adapterAny.postMessage(threadId, text);
+    if (adapter.postMessage) {
+      await adapter.postMessage(threadId, text);
       logger.info(
         { threadId, platform, text: text.slice(0, 50) },
         'Sent message via adapter',
