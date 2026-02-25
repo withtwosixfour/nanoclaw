@@ -45,7 +45,9 @@ function scheduleTask(
     context_mode?: 'group' | 'isolated';
     target_jid?: string;
   },
-): { ok: boolean; message: string } {
+): { ok: boolean; message: string; normalizedScheduleValue?: string } {
+  let normalizedScheduleValue = args.schedule_value;
+
   if (args.schedule_type === 'cron') {
     try {
       CronExpressionParser.parse(args.schedule_value);
@@ -90,6 +92,9 @@ function scheduleTask(
         message: `Invalid interval: "${args.schedule_value}". Use format like "30m" (30 minutes), "1h" (1 hour), "2d" (2 days), or milliseconds like "300000" (5 min).`,
       };
     }
+
+    // Store normalized milliseconds
+    normalizedScheduleValue = String(ms);
   } else if (args.schedule_type === 'once') {
     const date = new Date(args.schedule_value);
     if (isNaN(date.getTime())) {
@@ -126,34 +131,8 @@ function scheduleTask(
     });
     nextRun = interval.next().toISOString();
   } else if (args.schedule_type === 'interval') {
-    // Parse duration strings like "30m", "1h", "2d" or plain milliseconds
-    const durationValue = args.schedule_value.trim();
-    const durationMatch = durationValue.match(/^(\d+)\s*([smhd])?$/i);
-    let ms: number;
-
-    if (durationMatch) {
-      const num = parseInt(durationMatch[1], 10);
-      const unit = (durationMatch[2] || 's').toLowerCase();
-      switch (unit) {
-        case 's':
-          ms = num * 1000;
-          break;
-        case 'm':
-          ms = num * 60 * 1000;
-          break;
-        case 'h':
-          ms = num * 60 * 60 * 1000;
-          break;
-        case 'd':
-          ms = num * 24 * 60 * 60 * 1000;
-          break;
-        default:
-          ms = num;
-      }
-    } else {
-      ms = parseInt(durationValue, 10);
-    }
-
+    // Use the normalized milliseconds value directly
+    const ms = parseInt(normalizedScheduleValue, 10);
     nextRun = new Date(Date.now() + ms).toISOString();
   } else if (args.schedule_type === 'once') {
     // Use schedule_value directly as the target time (no timezone conversion)
@@ -173,7 +152,7 @@ function scheduleTask(
     chat_jid: targetJid,
     prompt: args.prompt,
     schedule_type: args.schedule_type,
-    schedule_value: args.schedule_value,
+    schedule_value: normalizedScheduleValue,
     context_mode: contextMode,
     next_run: nextRun,
     status: 'active',
@@ -183,6 +162,7 @@ function scheduleTask(
   return {
     ok: true,
     message: `Task scheduled (${taskId}): ${args.schedule_type} - ${args.schedule_value}`,
+    normalizedScheduleValue,
   };
 }
 

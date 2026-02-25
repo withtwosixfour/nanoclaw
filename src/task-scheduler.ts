@@ -118,34 +118,8 @@ async function runTask(
     });
     nextRun = interval.next().toISOString();
   } else if (task.schedule_type === 'interval') {
-    // Parse duration strings like "30m", "1h", "2d" or plain milliseconds
-    const durationValue = task.schedule_value.trim();
-    let ms: number;
-
-    const durationMatch = durationValue.match(/^(\d+)\s*([smhd])?$/i);
-    if (durationMatch) {
-      const num = parseInt(durationMatch[1], 10);
-      const unit = (durationMatch[2] || 's').toLowerCase();
-      switch (unit) {
-        case 's':
-          ms = num * 1000;
-          break;
-        case 'm':
-          ms = num * 60 * 1000;
-          break;
-        case 'h':
-          ms = num * 60 * 60 * 1000;
-          break;
-        case 'd':
-          ms = num * 24 * 60 * 60 * 1000;
-          break;
-        default:
-          ms = num;
-      }
-    } else {
-      // Fallback to plain milliseconds for backward compatibility
-      ms = parseInt(durationValue, 10);
-    }
+    // schedule_value is stored as normalized milliseconds
+    const ms = parseInt(task.schedule_value.trim(), 10);
 
     if (!isNaN(ms) && ms > 0) {
       nextRun = new Date(Date.now() + ms).toISOString();
