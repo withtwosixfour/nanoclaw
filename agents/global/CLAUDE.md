@@ -31,7 +31,7 @@ This will suppress any message from being sent. Useful for:
 - When the work is self-evident (file created, task scheduled)
 - Housekeeping tasks with no user-facing result
 
-The output must be ONLY "NO_REPLY" (whitespace is trimmed). This works for both regular conversations and scheduled tasks.
+The output must be ONLY "NO_REPLY" (whitespace is trimmed, no formatting, just the raw NO_REPLY message). This works for both regular conversations and scheduled tasks.
 
 ## Sending Attachments
 
