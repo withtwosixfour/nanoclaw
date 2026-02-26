@@ -1,23 +1,8 @@
 import path from 'path';
 
-import { readEnvFile } from './env.js';
-
-// Read config values from .env (falls back to process.env).
-// Secrets are NOT read here — they stay on disk and are loaded only
-// where needed to avoid leaking to child processes.
-const envConfig = readEnvFile([
-  'ASSISTANT_NAME',
-  'ASSISTANT_HAS_OWN_NUMBER',
-  'DISCORD_BOT_TOKEN',
-  'DISCORD_ONLY',
-  'ADMIN_USER_IDS',
-]);
-
-export const ASSISTANT_NAME =
-  process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
+export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
-  (process.env.ASSISTANT_HAS_OWN_NUMBER ||
-    envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+  process.env.ASSISTANT_HAS_OWN_NUMBER === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -48,8 +33,7 @@ function escapeRegex(str: string): string {
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-export const DISCORD_BOT_TOKEN =
-  process.env.DISCORD_BOT_TOKEN || envConfig.DISCORD_BOT_TOKEN || '';
+export const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 
 // Platform-specific credentials (optional - only configure platforms you use)
 // Discord
@@ -73,11 +57,7 @@ export const GOOGLE_CHAT_CREDENTIALS =
 
 // Comma-separated list of authorized user IDs who can trigger /update command
 // Format: 1234567890@s.whatsapp.net,discord:123456789012345678
-export const ADMIN_USER_IDS = (
-  process.env.ADMIN_USER_IDS ||
-  envConfig.ADMIN_USER_IDS ||
-  ''
-)
+export const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '')
   .split(',')
   .map((id) => id.trim())
   .filter((id) => id.length > 0);

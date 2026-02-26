@@ -1,23 +1,20 @@
+import { config } from 'dotenv';
+config({ path: path.join(process.cwd(), '.env') });
+
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
-import { createChatSdkBot, sendMessageToJid } from './chat-sdk-bot.js';
-import { logger } from './logger.js';
-import { formatOutbound } from './router.js';
-import { startSchedulerLoop } from './task-scheduler.js';
-import { GroupQueue } from './group-queue.js';
-import { initDatabase, getAllAgents, getAllSessions, setAgent } from './db.js';
-import { Agent } from './types.js';
-import {
-  AgentOutput,
-  AgentInput,
-  createAgentRuntime,
-} from './agent-runner/runtime.js';
-import { getOrCreateSessionId } from './agent-runner/session-store.js';
+import { DATA_DIR } from './config';
+import { createChatSdkBot, sendMessageToJid } from './chat-sdk-bot';
+import { logger } from './logger';
+import { formatOutbound } from './router';
+import { startSchedulerLoop } from './task-scheduler';
+import { GroupQueue } from './group-queue';
+import { initDatabase, getAllAgents, getAllSessions } from './db';
+import { AgentInput, createAgentRuntime } from './agent-runner/runtime';
 
 // Re-export for backwards compatibility during refactor
-export { escapeXml, formatMessages } from './router.js';
+export { escapeXml, formatMessages } from './router';
 
 // Catch unhandled errors to prevent lock issues
 process.on('unhandledRejection', (reason, promise) => {

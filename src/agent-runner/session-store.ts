@@ -13,6 +13,7 @@ import type {
 import { SESSIONS_DIR } from '../config.js';
 import { getSessionPath } from '../router.js';
 import { logger } from '../logger.js';
+import { object } from 'zod/v3';
 
 const dbs = new Map<string, Database.Database>();
 
@@ -21,7 +22,7 @@ function getSessionDbPath(jid: string): string {
   return path.join(sessionDir, 'conversation.db');
 }
 
-function getDb(jid: string): Database.Database {
+export function getDb(jid: string): Database.Database {
   const existing = dbs.get(jid);
   if (existing) return existing;
   const dbPath = getSessionDbPath(jid);
@@ -234,6 +235,20 @@ export function replaceSessionMessages(
   insertMany();
 }
 
+export function markMessageCompacted(
+  jid: string,
+  sessionId: string,
+  upToId: number,
+): void {
+  const database = getDb(jid);
+  const stmt = database.prepare(
+    `UPDATE conversation_history
+     SET is_compacted = TRUE, compacted_at = ?
+     WHERE session_id = ? AND id = ? AND (is_compacted IS NULL OR is_compacted = FALSE)`,
+  );
+  stmt.run(new Date().toISOString(), sessionId, upToId);
+}
+
 function serializeMessage(message: ModelMessage): {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string | null;
@@ -264,7 +279,7 @@ function deserializeMessage(row: {
   tool_results: string | null;
 }): ModelMessage {
   if (row.role === 'tool') {
-    const toolResults = normalizeToolResults(row.tool_results, row.content);
+    const toolResults = normalizeToolResults(row.tool_results);
     return {
       role: 'tool',
       content: toolResults,
@@ -315,22 +330,16 @@ function serializeToolCalls(
   return JSON.stringify(toolCalls);
 }
 
-function normalizeToolResults(
-  toolResults: string | null,
-  content: string | null,
-): ToolResultPart[] {
+function normalizeToolResults(toolResults: any): ToolResultPart[] {
   if (!toolResults) return [];
   try {
     return JSON.parse(toolResults) as ToolResultPart[];
-  } catch {
-    if (!content) return [];
-    const fallback = {
-      type: 'tool-result',
-      toolName: 'unknown',
-      toolCallId: 'unknown',
-      output: content as unknown,
-    } as unknown as ToolResultPart;
-    return [fallback];
+  } catch (e) {
+    logger.error(
+      { err: JSON.stringify(e, Object.keys(e as any)) },
+      'Error normalizing tool calls',
+    );
+    throw e;
   }
 }
 

@@ -246,6 +246,39 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Migration: Add compaction columns to conversation_history tables
+  try {
+    database.exec(
+      `ALTER TABLE conversation_history ADD COLUMN is_compacted BOOLEAN DEFAULT FALSE`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE conversation_history ADD COLUMN compacted_at TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE conversation_history ADD COLUMN is_compacted_summary BOOLEAN DEFAULT FALSE`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `CREATE INDEX idx_conversation_compacted ON conversation_history(session_id, is_compacted)`,
+    );
+  } catch {
+    /* index already exists */
+  }
 }
 
 export function initDatabase(): void {
