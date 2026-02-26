@@ -52,7 +52,6 @@ const agentRuntime = createAgentRuntime({
       logger.error({ jid, err }, 'Failed to send message from agent runtime');
     }
   },
-  registerAgent: (id: string, agent: Agent) => setAgent(id, agent),
   getRegisteredAgents: () => getAllAgents(),
 });
 
