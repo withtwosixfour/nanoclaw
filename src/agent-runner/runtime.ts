@@ -435,6 +435,7 @@ async function runQuery(
             agent: input.agentId,
             sessionId,
             responseMessageCount: responseMessages.length,
+            stepCount: event.stepNumber,
             usageTokens,
             finishReason: event.finishReason,
             responseMessages,
