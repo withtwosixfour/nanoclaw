@@ -15,7 +15,6 @@ import {
   storeMessage,
   storeAttachment,
   storeChatMetadata,
-  initDatabase,
   getAgent,
   getSession,
   setSession,
@@ -604,10 +603,6 @@ Add this to your \`ROUTES\` in \`src/router.ts\`:
  * Create and configure the Chat SDK bot
  */
 export async function createChatSdkBot(): Promise<Chat> {
-  // Initialize database
-  initDatabase();
-  logger.info('Database initialized');
-
   // Create SQLite state adapter
   stateAdapter = createSQLiteState(path.join(DATA_DIR, 'nanoclaw.db'));
   await stateAdapter.connect();

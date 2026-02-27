@@ -10,11 +10,14 @@ import { logger } from './logger';
 import { formatOutbound } from './router';
 import { startSchedulerLoop } from './task-scheduler';
 import { GroupQueue } from './group-queue';
-import { initDatabase, getAllAgents, getAllSessions } from './db';
+import { runMigrations } from '../scripts/migrate';
+import { getAllAgents, getAllSessions } from './db';
 import { AgentInput, createAgentRuntime } from './agent-runner/runtime';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router';
+
+await runMigrations();
 
 // Catch unhandled errors to prevent lock issues
 process.on('unhandledRejection', (reason, promise) => {
@@ -62,8 +65,6 @@ async function main(): Promise<void> {
   console.log('\n  NanoClaw Chat SDK Bot started');
   console.log('  Event-driven mode - no polling loop\n');
 
-  // Initialize database first (required by scheduler)
-  initDatabase();
   logger.info('Database initialized');
 
   // Start scheduler loop for background tasks
