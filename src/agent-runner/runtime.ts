@@ -320,7 +320,7 @@ async function runQuery(
   } else {
     messages.push({ role: 'system', content: routeContext });
   }
-  const loadedMessages = loadMessages(input.chatJid, sessionId);
+  const loadedMessages = await loadMessages(input.chatJid, sessionId);
   messages.push(...loadedMessages);
 
   // Prepend current datetime to the prompt so model always knows the current time
@@ -435,25 +435,28 @@ async function runQuery(
           .filter((m) => m.role === 'assistant')
           .pop();
 
-        pruneToolOutputs(input.chatJid, sessionId);
+        // Fire and forget - don't block on pruning
+        pruneToolOutputs(input.chatJid, sessionId).catch((err) => {
+          logger.warn({ jid: input.chatJid, sessionId, err }, 'Pruning failed');
+        });
 
         // Check for mid-stream overflow
         const threshold = getCompactionThreshold(config);
-        const currentTokens =
-          getSessionTokenCount(input.chatJid, sessionId) + usageTokens;
-
-        if (currentTokens >= threshold && !activeCompactions.has(sessionId)) {
-          logger.warn(
-            {
-              agent: input.agentId,
-              sessionId,
-              currentTokens,
-              threshold,
-              overflow: currentTokens - threshold,
-            },
-            'Context overflow detected mid-stream',
-          );
-        }
+        getSessionTokenCount(input.chatJid, sessionId).then((tokenCount) => {
+          const currentTokens = tokenCount + usageTokens;
+          if (currentTokens >= threshold && !activeCompactions.has(sessionId)) {
+            logger.warn(
+              {
+                agent: input.agentId,
+                sessionId,
+                currentTokens,
+                threshold,
+                overflow: currentTokens - threshold,
+              },
+              'Context overflow detected mid-stream',
+            );
+          }
+        });
 
         logger.debug(
           {
@@ -579,7 +582,7 @@ async function runQuery(
   }
 
   // Save messages to session store
-  saveMessage(
+  await saveMessage(
     input.chatJid,
     sessionId,
     { role: 'user', content: prompt },
@@ -592,7 +595,12 @@ async function runQuery(
       !tokenAssigned && message.role === 'assistant' ? usageTokens : null;
     if (tokenCount != null) tokenAssigned = true;
 
-    saveMessage(input.chatJid, sessionId, message, tokenCount);
+    saveMessage(input.chatJid, sessionId, message, tokenCount).catch((err) => {
+      logger.warn(
+        { jid: input.chatJid, sessionId, err },
+        'Failed to save message',
+      );
+    });
   }
 
   const totalDuration = Date.now() - queryStartTime;
@@ -657,7 +665,7 @@ async function maybeCompactSession(
   const threshold = getCompactionThreshold(config);
 
   const currentTokens =
-    getSessionTokenCount(input.chatJid, sessionId) + (usageTokens || 0);
+    (await getSessionTokenCount(input.chatJid, sessionId)) + (usageTokens || 0);
 
   logger.debug(
     {
@@ -702,7 +710,7 @@ async function maybeCompactSessionPreflight(
   }
 
   // Load only uncompacted messages
-  const messages = loadMessages(input.chatJid, sessionId);
+  const messages = await loadMessages(input.chatJid, sessionId);
   if (messages.length < 4) {
     logger.debug(
       { agent: input.agentId, sessionId, messageCount: messages.length },
@@ -752,7 +760,7 @@ async function maybeCompactSessionPreflight(
   if (totalEstimatedTokens < threshold) return;
 
   // Re-check after pruning
-  const prunedMessages = loadMessages(input.chatJid, sessionId);
+  const prunedMessages = await loadMessages(input.chatJid, sessionId);
   const newEstimate =
     estimateTokenCount(prunedMessages) +
     Math.ceil(promptText.length / 4) +
@@ -787,7 +795,7 @@ async function compactSession(
   );
 
   try {
-    const messages = loadMessages(input.chatJid, sessionId);
+    const messages = await loadMessages(input.chatJid, sessionId);
     if (messages.length < 4) {
       logger.debug(
         { agent: input.agentId, sessionId, messageCount: messages.length },
@@ -862,7 +870,7 @@ async function compactSession(
     };
 
     // Replace messages: summary + recent (both soft compacted and recent)
-    replaceSessionMessages(input.chatJid, sessionId, [
+    await replaceSessionMessages(input.chatJid, sessionId, [
       summaryMessage,
       ...recent,
     ]);

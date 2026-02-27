@@ -1,7 +1,7 @@
-import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { eq, and, isNull, sql } from 'drizzle-orm';
 import type {
   JSONValue,
   ModelMessage,
@@ -10,40 +10,14 @@ import type {
   ToolResultPart,
 } from 'ai';
 
-import { SESSIONS_DIR } from '../config.js';
 import { getSessionPath } from '../router.js';
 import { logger } from '../logger.js';
-import { object } from 'zod/v3';
-
-const dbs = new Map<string, Database.Database>();
+import { getSessionDb, closeSessionDb } from '../db/sessions/client.js';
+import { conversationHistory } from '../db/sessions/schema.js';
 
 function getSessionDbPath(jid: string): string {
   const sessionDir = getSessionPath(jid);
   return path.join(sessionDir, 'conversation.db');
-}
-
-export function getDb(jid: string): Database.Database {
-  const existing = dbs.get(jid);
-  if (existing) return existing;
-  const dbPath = getSessionDbPath(jid);
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS conversation_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
-      content TEXT,
-      tool_calls TEXT,
-      tool_results TEXT,
-      token_count INTEGER,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_history(session_id);
-    CREATE INDEX IF NOT EXISTS idx_conversation_created ON conversation_history(created_at);
-  `);
-  dbs.set(jid, db);
-  return db;
 }
 
 function getSessionFilePath(jid: string): string {
@@ -51,7 +25,7 @@ function getSessionFilePath(jid: string): string {
   return path.join(sessionDir, 'session.json');
 }
 
-export function clearSession(jid: string): void {
+export async function clearSession(jid: string): Promise<void> {
   const sessionFilePath = getSessionFilePath(jid);
   try {
     fs.unlinkSync(sessionFilePath);
@@ -62,21 +36,10 @@ export function clearSession(jid: string): void {
   }
 
   // Close the database connection before deleting the file
-  const db = dbs.get(jid);
-  if (db) {
-    try {
-      db.close();
-    } catch (err) {
-      logger?.warn?.(
-        { jid, err },
-        'Error closing database connection during clear',
-      );
-    }
-    dbs.delete(jid);
-  }
-
-  // Also clear the conversation history from the database
   const dbPath = getSessionDbPath(jid);
+  closeSessionDb(dbPath);
+
+  // Delete the database file
   if (fs.existsSync(dbPath)) {
     try {
       fs.unlinkSync(dbPath);
@@ -116,137 +79,165 @@ export function getOrCreateSessionId(jid: string, agentId: string): string {
   return sessionId;
 }
 
-export function loadMessages(jid: string, sessionId: string): ModelMessage[] {
-  const database = getDb(jid);
-  const rows = database
-    .prepare(
-      `SELECT role, content, tool_calls, tool_results
-       FROM conversation_history
-       WHERE session_id = ?
-       ORDER BY id ASC`,
-    )
-    .all(sessionId) as Array<{
-    role: 'user' | 'assistant' | 'system' | 'tool';
-    content: string | null;
-    tool_calls: string | null;
-    tool_results: string | null;
-  }>;
+export async function loadMessages(
+  jid: string,
+  sessionId: string,
+): Promise<ModelMessage[]> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
+
+  const rows = await db
+    .select({
+      role: conversationHistory.role,
+      content: conversationHistory.content,
+      toolCalls: conversationHistory.toolCalls,
+      toolResults: conversationHistory.toolResults,
+    })
+    .from(conversationHistory)
+    .where(eq(conversationHistory.sessionId, sessionId))
+    .orderBy(conversationHistory.id);
 
   return rows.map((row) => deserializeMessage(row));
 }
 
-export function saveMessage(
+export async function saveMessage(
   jid: string,
   sessionId: string,
   message: ModelMessage,
   tokenCount?: number | null,
-): void {
-  const database = getDb(jid);
+): Promise<void> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
+
   const { role, content, toolCalls, toolResults } = serializeMessage(message);
-  database
-    .prepare(
-      `INSERT INTO conversation_history (session_id, role, content, tool_calls, tool_results, token_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      sessionId,
-      role,
-      content,
-      toolCalls,
-      toolResults,
-      tokenCount ?? null,
-      new Date().toISOString(),
-    );
+
+  await db.insert(conversationHistory).values({
+    sessionId,
+    role,
+    content,
+    toolCalls,
+    toolResults,
+    tokenCount: tokenCount ?? null,
+    createdAt: new Date().toISOString(),
+  });
 }
 
-export function getSessionTokenCount(jid: string, sessionId: string): number {
-  const database = getDb(jid);
-  const row = database
-    .prepare(
-      `SELECT SUM(token_count) as total
-       FROM conversation_history
-       WHERE session_id = ? AND token_count IS NOT NULL`,
-    )
-    .get(sessionId) as { total: number | null } | undefined;
-  return row?.total ?? 0;
-}
-
-export function getSessionMessageCount(jid: string, sessionId: string): number {
-  const database = getDb(jid);
-  const row = database
-    .prepare(
-      `SELECT COUNT(*) as count
-       FROM conversation_history
-       WHERE session_id = ?`,
-    )
-    .get(sessionId) as { count: number } | undefined;
-  return row?.count ?? 0;
-}
-
-export function getSessionLastTimestamp(
+export async function getSessionTokenCount(
   jid: string,
   sessionId: string,
-): string | null {
-  const database = getDb(jid);
-  const row = database
-    .prepare(
-      `SELECT created_at
-       FROM conversation_history
-       WHERE session_id = ?
-       ORDER BY id DESC
-       LIMIT 1`,
-    )
-    .get(sessionId) as { created_at: string } | undefined;
-  return row?.created_at ?? null;
+): Promise<number> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
+
+  const result = await db
+    .select({
+      total: sql<number>`SUM(${conversationHistory.tokenCount})`,
+    })
+    .from(conversationHistory)
+    .where(
+      and(
+        eq(conversationHistory.sessionId, sessionId),
+        sql`${conversationHistory.tokenCount} IS NOT NULL`,
+      ),
+    );
+
+  return result[0]?.total ?? 0;
 }
 
-export function replaceSessionMessages(
+export async function getSessionMessageCount(
+  jid: string,
+  sessionId: string,
+): Promise<number> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
+
+  const result = await db
+    .select({
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(conversationHistory)
+    .where(eq(conversationHistory.sessionId, sessionId));
+
+  return result[0]?.count ?? 0;
+}
+
+export async function getSessionLastTimestamp(
+  jid: string,
+  sessionId: string,
+): Promise<string | null> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
+
+  const result = await db
+    .select({
+      createdAt: conversationHistory.createdAt,
+    })
+    .from(conversationHistory)
+    .where(eq(conversationHistory.sessionId, sessionId))
+    .orderBy(sql`${conversationHistory.id} DESC`)
+    .limit(1);
+
+  return result[0]?.createdAt ?? null;
+}
+
+export async function replaceSessionMessages(
   jid: string,
   sessionId: string,
   messages: ModelMessage[],
-): void {
-  const database = getDb(jid);
-  const deleteStmt = database.prepare(
-    `DELETE FROM conversation_history WHERE session_id = ?`,
-  );
-  const insertStmt = database.prepare(
-    `INSERT INTO conversation_history (session_id, role, content, tool_calls, tool_results, token_count, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  );
+): Promise<void> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
 
   const now = new Date().toISOString();
-  const insertMany = database.transaction(() => {
-    deleteStmt.run(sessionId);
+
+  // Delete existing messages and insert new ones in a transaction
+  const sqlite = db.$client;
+  const transaction = sqlite.transaction(() => {
+    db.delete(conversationHistory)
+      .where(eq(conversationHistory.sessionId, sessionId))
+      .run();
+
     for (const message of messages) {
       const { role, content, toolCalls, toolResults } =
         serializeMessage(message);
-      insertStmt.run(
-        sessionId,
-        role,
-        content,
-        toolCalls,
-        toolResults,
-        null,
-        now,
-      );
+      db.insert(conversationHistory)
+        .values({
+          sessionId,
+          role,
+          content,
+          toolCalls,
+          toolResults,
+          tokenCount: null,
+          createdAt: now,
+        })
+        .run();
     }
   });
 
-  insertMany();
+  transaction();
 }
 
-export function markMessageCompacted(
+export async function markMessageCompacted(
   jid: string,
   sessionId: string,
   upToId: number,
-): void {
-  const database = getDb(jid);
-  const stmt = database.prepare(
-    `UPDATE conversation_history
-     SET is_compacted = TRUE, compacted_at = ?
-     WHERE session_id = ? AND id = ? AND (is_compacted IS NULL OR is_compacted = FALSE)`,
-  );
-  stmt.run(new Date().toISOString(), sessionId, upToId);
+): Promise<void> {
+  const dbPath = getSessionDbPath(jid);
+  const db = await getSessionDb(dbPath);
+
+  await db
+    .update(conversationHistory)
+    .set({
+      isCompacted: true,
+      compactedAt: new Date().toISOString(),
+    })
+    .where(
+      and(
+        eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.id, upToId),
+        sql`(${conversationHistory.isCompacted} IS NULL OR ${conversationHistory.isCompacted} = FALSE)`,
+      ),
+    );
 }
 
 function serializeMessage(message: ModelMessage): {
@@ -273,13 +264,13 @@ function serializeMessage(message: ModelMessage): {
 }
 
 function deserializeMessage(row: {
-  role: 'user' | 'assistant' | 'system' | 'tool';
+  role: string;
   content: string | null;
-  tool_calls: string | null;
-  tool_results: string | null;
+  toolCalls: string | null;
+  toolResults: string | null;
 }): ModelMessage {
   if (row.role === 'tool') {
-    const toolResults = normalizeToolResults(row.tool_results);
+    const toolResults = normalizeToolResults(row.toolResults);
     return {
       role: 'tool',
       content: toolResults,
@@ -287,12 +278,12 @@ function deserializeMessage(row: {
   }
 
   const message: ModelMessage = {
-    role: row.role,
+    role: row.role as 'user' | 'assistant' | 'system',
     content: row.content || '',
   };
 
-  if (row.tool_calls) {
-    (message as { toolCalls?: unknown }).toolCalls = JSON.parse(row.tool_calls);
+  if (row.toolCalls) {
+    (message as { toolCalls?: unknown }).toolCalls = JSON.parse(row.toolCalls);
   }
 
   return message;
