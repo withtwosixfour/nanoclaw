@@ -30,6 +30,7 @@ import {
   loadMessages,
   saveMessage,
   replaceSessionMessages,
+  saveCompactionOutput,
 } from './session-store';
 import { truncateOutput } from '../context/truncate';
 import { getRouteInfo } from '../router';
@@ -615,6 +616,7 @@ async function runQuery(
   // Save messages to session store
   await saveMessage(
     input.chatJid,
+    input.agentId,
     sessionId,
     { role: 'user', content: prompt },
     null,
@@ -630,14 +632,18 @@ async function runQuery(
     // This happens BEFORE saving, so massive outputs don't bloat the context
     const truncatedMessage = truncateToolResultsInMessage(message);
 
-    saveMessage(input.chatJid, sessionId, truncatedMessage, tokenCount).catch(
-      (err) => {
-        logger.warn(
-          { jid: input.chatJid, sessionId, err },
-          'Failed to save message',
-        );
-      },
-    );
+    saveMessage(
+      input.chatJid,
+      input.agentId,
+      sessionId,
+      truncatedMessage,
+      tokenCount,
+    ).catch((err) => {
+      logger.warn(
+        { jid: input.chatJid, sessionId, err },
+        'Failed to save message',
+      );
+    });
   }
 
   const totalDuration = Date.now() - queryStartTime;
@@ -908,10 +914,21 @@ async function compactSession(
     const filteredRecent = recent.filter((msg) => msg.role !== 'tool');
 
     // Replace messages: summary + filtered recent (without tool messages)
-    await replaceSessionMessages(input.chatJid, sessionId, [
+    await replaceSessionMessages(input.chatJid, input.agentId, sessionId, [
       summaryMessage,
       ...filteredRecent,
     ]);
+
+    // Save compaction output to agent workspace for visibility
+    const timestamp = new Date().toISOString();
+    await saveCompactionOutput(
+      input.agentId,
+      sessionId,
+      input.chatJid,
+      summaryText,
+      older.length,
+      timestamp,
+    );
 
     const totalDuration = Date.now() - compactionStart;
     logger.info(

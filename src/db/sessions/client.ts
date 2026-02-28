@@ -3,26 +3,21 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import * as schema from './schema.js';
-import { migrateNewSessionDb } from '../../../scripts/migrate.js';
 
 const dbs = new Map<string, ReturnType<typeof drizzle<typeof schema>>>();
 
+/**
+ * @deprecated Session databases are deprecated. Session data is now stored in the main database.
+ * This function is kept for backward compatibility during migration period.
+ */
 export async function getSessionDb(
   dbPath: string,
 ): Promise<ReturnType<typeof drizzle<typeof schema>>> {
   const existing = dbs.get(dbPath);
   if (existing) return existing;
 
-  // Check if this is a new database
-  const isNewDb = !fs.existsSync(dbPath);
-
   // Ensure directory exists
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-
-  // If new, run migrations first
-  if (isNewDb) {
-    await migrateNewSessionDb(dbPath);
-  }
 
   const sqlite = new Database(dbPath);
   const db = drizzle(sqlite, { schema });
@@ -30,6 +25,9 @@ export async function getSessionDb(
   return db;
 }
 
+/**
+ * @deprecated Session databases are deprecated.
+ */
 export function closeSessionDb(dbPath: string): void {
   const db = dbs.get(dbPath);
   if (db) {
@@ -44,6 +42,9 @@ export function closeSessionDb(dbPath: string): void {
   }
 }
 
+/**
+ * @deprecated Session databases are deprecated.
+ */
 export function closeAllSessionDbs(): void {
   for (const [path, db] of dbs) {
     const sqlite = db.$client as Database.Database;
