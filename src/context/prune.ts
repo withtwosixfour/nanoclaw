@@ -1,10 +1,8 @@
 import { eq, and, sql } from 'drizzle-orm';
-import { getSessionDb } from '../db/sessions/client.js';
-import { conversationHistory } from '../db/sessions/schema.js';
+import { db } from '../db/main/client.js';
+import { conversationHistory } from '../db/main/schema.js';
 import { logger } from '../logger.js';
 import { estimateTokens } from './token.js';
-import path from 'path';
-import { getSessionPath } from '../router.js';
 
 // Thresholds (from opencode)
 const PRUNE_MINIMUM = 20_000; // Must exceed this to actually prune
@@ -18,11 +16,6 @@ export interface PruneResult {
   protectedTurns: number; // Number of user turns protected
 }
 
-function getSessionDbPath(jid: string): string {
-  const sessionDir = getSessionPath(jid);
-  return path.join(sessionDir, 'conversation.db');
-}
-
 /**
  * Prune old tool outputs from the conversation.
  * Walks backwards through history, protecting recent turns.
@@ -34,9 +27,6 @@ export async function pruneToolOutputs(
 ): Promise<PruneResult> {
   logger.debug({ jid, sessionId }, 'Starting tool output pruning');
   const startTime = Date.now();
-
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
 
   let total = 0;
   let pruned = 0;
@@ -53,7 +43,12 @@ export async function pruneToolOutputs(
       compactedAt: conversationHistory.compactedAt,
     })
     .from(conversationHistory)
-    .where(eq(conversationHistory.sessionId, sessionId))
+    .where(
+      and(
+        eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
+      ),
+    )
     .orderBy(sql`${conversationHistory.id} DESC`);
 
   // Walk backwards through messages
@@ -113,6 +108,7 @@ export async function pruneToolOutputs(
         .where(
           and(
             eq(conversationHistory.sessionId, sessionId),
+            eq(conversationHistory.jid, jid),
             eq(conversationHistory.id, messageId),
           ),
         );
@@ -145,9 +141,6 @@ export async function shouldPrune(
   sessionId: string,
   threshold: number = PRUNE_PROTECT,
 ): Promise<boolean> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const rows = await db
     .select({
       toolResults: conversationHistory.toolResults,
@@ -156,6 +149,7 @@ export async function shouldPrune(
     .where(
       and(
         eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
         eq(conversationHistory.role, 'tool'),
         sql`(${conversationHistory.isCompacted} IS NULL OR ${conversationHistory.isCompacted} = FALSE)`,
       ),

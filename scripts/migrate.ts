@@ -1,6 +1,7 @@
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql/node';
+import { eq } from 'drizzle-orm';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -8,12 +9,12 @@ import { STORE_DIR, SESSIONS_DIR } from '../src/config.js';
 import * as mainSchema from '../src/db/main/schema.js';
 import * as sessionSchema from '../src/db/sessions/schema.js';
 import { logger } from '../src/logger.js';
+import { db as mainDb } from '../src/db/main/client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 
 const mainMigrationsFolder = path.join(rootDir, 'drizzle', 'main');
-const sessionMigrationsFolder = path.join(rootDir, 'drizzle', 'sessions');
 
 /**
  * Run migrations on a database
@@ -21,7 +22,7 @@ const sessionMigrationsFolder = path.join(rootDir, 'drizzle', 'sessions');
 export async function runMigrationsOnDb(
   dbPath: string,
   migrationsFolder: string,
-  schema: typeof mainSchema | typeof sessionSchema,
+  schema: typeof mainSchema,
   dbName: string,
 ): Promise<void> {
   const isNewDb = !fs.existsSync(dbPath);
@@ -93,49 +94,124 @@ export function findSessionDbs(): string[] {
 }
 
 /**
- * Migrate a single session database
+ * Migrate data from individual session databases to the main database
  */
-export async function migrateSessionDb(dbPath: string): Promise<void> {
-  const jid = path.basename(path.dirname(dbPath));
-  await runMigrationsOnDb(
-    dbPath,
-    sessionMigrationsFolder,
-    sessionSchema,
-    `session:${jid}`,
-  );
-}
-
-/**
- * Migrate all existing session databases
- */
-export async function migrateAllSessionDbs(): Promise<void> {
+export async function migrateSessionDataToMainDb(): Promise<void> {
   const sessionDbs = findSessionDbs();
 
   if (sessionDbs.length === 0) {
-    logger.info('No existing session databases found');
+    logger.info('No session databases to migrate to main DB');
     return;
   }
 
-  logger.info({ count: sessionDbs.length }, 'Migrating session databases');
+  logger.info(
+    { count: sessionDbs.length },
+    'Migrating session data to main database',
+  );
 
   for (const dbPath of sessionDbs) {
-    await migrateSessionDb(dbPath);
+    const jid = path.basename(path.dirname(dbPath));
+    const sessionFilePath = path.join(path.dirname(dbPath), 'session.json');
+
+    // Read session metadata to get agentId and sessionId
+    let agentId = 'unknown';
+    let sessionId = jid;
+
+    try {
+      if (fs.existsSync(sessionFilePath)) {
+        const sessionData = JSON.parse(
+          fs.readFileSync(sessionFilePath, 'utf-8'),
+        ) as {
+          agentId?: string;
+          sessionId?: string;
+        };
+        agentId = sessionData.agentId || 'unknown';
+        sessionId = sessionData.sessionId || jid;
+      }
+    } catch (err) {
+      logger.warn({ jid, err }, 'Failed to read session metadata');
+    }
+
+    // Check if we already have data for this session in main DB
+    const existingResult = await mainDb
+      .select({ count: mainSchema.conversationHistory.id })
+      .from(mainSchema.conversationHistory)
+      .where(eq(mainSchema.conversationHistory.sessionId, sessionId));
+
+    const existingCount = existingResult.length;
+
+    if (existingCount > 0) {
+      logger.info(
+        { jid, sessionId, existingCount },
+        'Session data already exists in main DB, skipping migration',
+      );
+      continue;
+    }
+
+    // Connect to old session database
+    const sqlite = createClient({ url: 'file:' + dbPath });
+    const sessionDb = drizzle(sqlite, { schema: sessionSchema });
+
+    try {
+      // Get all conversation history from the session DB
+      const rows = await sessionDb
+        .select()
+        .from(sessionSchema.conversationHistory)
+        .where(eq(sessionSchema.conversationHistory.sessionId, sessionId));
+
+      if (rows.length === 0) {
+        logger.info({ jid, sessionId }, 'No conversation data to migrate');
+        sqlite.close();
+        continue;
+      }
+
+      // Insert into main DB
+      for (const row of rows) {
+        await mainDb.insert(mainSchema.conversationHistory).values({
+          sessionId: row.sessionId,
+          jid: jid,
+          agentId: agentId,
+          role: row.role as 'user' | 'assistant' | 'system' | 'tool',
+          content: row.content,
+          toolCalls: row.toolCalls,
+          toolResults: row.toolResults,
+          tokenCount: row.tokenCount,
+          createdAt: row.createdAt,
+          isCompacted: row.isCompacted,
+          compactedAt: row.compactedAt,
+          isCompactedSummary: row.isCompactedSummary,
+          provider: row.provider,
+          model: row.model,
+        });
+      }
+
+      logger.info(
+        { jid, sessionId, migratedCount: rows.length, agentId },
+        'Migrated session data to main DB',
+      );
+    } catch (err) {
+      logger.error({ jid, sessionId, err }, 'Failed to migrate session data');
+    } finally {
+      sqlite.close();
+    }
   }
+
+  logger.info('Session data migration complete');
 }
 
 /**
- * Run all migrations (main + all existing sessions)
+ * Run all migrations (main + migrate session data)
  * Call this on startup
  */
 export async function runMigrations(): Promise<void> {
   logger.info('Starting database migrations');
 
   try {
-    // Migrate main database
+    // Migrate main database (this creates the conversation_history table)
     await migrateMainDb();
 
-    // Migrate all existing session databases
-    await migrateAllSessionDbs();
+    // Migrate data from old session databases to main DB
+    await migrateSessionDataToMainDb();
 
     logger.info('All migrations complete');
   } catch (error) {
@@ -145,19 +221,6 @@ export async function runMigrations(): Promise<void> {
     );
     throw error;
   }
-}
-
-/**
- * Run migrations on a new session database (called when creating new session)
- */
-export async function migrateNewSessionDb(dbPath: string): Promise<void> {
-  const jid = path.basename(path.dirname(dbPath));
-  await runMigrationsOnDb(
-    dbPath,
-    sessionMigrationsFolder,
-    sessionSchema,
-    `session:${jid}`,
-  );
 }
 
 /**

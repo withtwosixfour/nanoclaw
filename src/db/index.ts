@@ -2,10 +2,5 @@
 export { db } from './main/client';
 export * as schema from './main/schema';
 
-// Session database exports
-export {
-  getSessionDb,
-  closeSessionDb,
-  closeAllSessionDbs,
-} from './sessions/client';
+// Session schema is now in main DB - kept for backward compatibility during migration
 export * as sessionSchema from './sessions/schema';

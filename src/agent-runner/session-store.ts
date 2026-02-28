@@ -10,20 +10,60 @@ import type {
   ToolResultPart,
 } from 'ai';
 
-import { getSessionPath } from '../router.js';
+import { getSessionPath, getAgentPath } from '../router.js';
 import { logger } from '../logger.js';
-import { getSessionDb, closeSessionDb } from '../db/sessions/client.js';
-import { conversationHistory } from '../db/sessions/schema.js';
+import { db } from '../db/main/client.js';
+import { conversationHistory } from '../db/main/schema.js';
 import { truncateOutput } from '../context/truncate.js';
 
-function getSessionDbPath(jid: string): string {
-  const sessionDir = getSessionPath(jid);
-  return path.join(sessionDir, 'conversation.db');
-}
+const COMPACTIONS_DIR = '.compactions';
 
 function getSessionFilePath(jid: string): string {
   const sessionDir = getSessionPath(jid);
   return path.join(sessionDir, 'session.json');
+}
+
+export function getAgentCompactionsDir(agentId: string): string {
+  const agentDir = getAgentPath(agentId);
+  return path.join(agentDir, COMPACTIONS_DIR);
+}
+
+export async function saveCompactionOutput(
+  agentId: string,
+  sessionId: string,
+  jid: string,
+  summaryText: string,
+  olderMessageCount: number,
+  timestamp: string,
+): Promise<string> {
+  const compactionsDir = getAgentCompactionsDir(agentId);
+  fs.mkdirSync(compactionsDir, { recursive: true });
+
+  const sanitizedJid = jid.replace(/[:@]/g, '_');
+  const filename = `${sanitizedJid}_${timestamp.replace(/[:.]/g, '-')}.md`;
+  const filepath = path.join(compactionsDir, filename);
+
+  const content = `# Session Compaction: ${sessionId}
+
+**JID:** ${jid}  
+**Timestamp:** ${timestamp}  
+**Compacted Messages:** ${olderMessageCount}
+
+## Summary
+
+${summaryText}
+
+---
+*This file contains a summary of earlier conversation messages that were compacted to manage context window size.*
+`;
+
+  fs.writeFileSync(filepath, content, 'utf-8');
+  logger.info(
+    { agentId, sessionId, jid, filepath, olderMessageCount },
+    'Saved compaction output to agent workspace',
+  );
+
+  return filepath;
 }
 
 export async function clearSession(jid: string): Promise<void> {
@@ -36,20 +76,8 @@ export async function clearSession(jid: string): Promise<void> {
     }
   }
 
-  // Close the database connection before deleting the file
-  const dbPath = getSessionDbPath(jid);
-  closeSessionDb(dbPath);
-
-  // Delete the database file
-  if (fs.existsSync(dbPath)) {
-    try {
-      fs.unlinkSync(dbPath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err;
-      }
-    }
-  }
+  // Delete from main DB
+  await db.delete(conversationHistory).where(eq(conversationHistory.jid, jid));
 }
 
 export function getOrCreateSessionId(jid: string, agentId: string): string {
@@ -84,9 +112,6 @@ export async function loadMessages(
   jid: string,
   sessionId: string,
 ): Promise<ModelMessage[]> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const rows = await db
     .select({
       role: conversationHistory.role,
@@ -98,6 +123,7 @@ export async function loadMessages(
     .where(
       and(
         eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
         or(
           eq(conversationHistory.isCompacted, false),
           sql`${conversationHistory.isCompacted} IS NULL`,
@@ -115,17 +141,17 @@ export async function loadMessages(
 
 export async function saveMessage(
   jid: string,
+  agentId: string,
   sessionId: string,
   message: ModelMessage,
   tokenCount?: number | null,
 ): Promise<void> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const { role, content, toolCalls, toolResults } = serializeMessage(message);
 
   await db.insert(conversationHistory).values({
     sessionId,
+    jid,
+    agentId,
     role,
     content,
     toolCalls,
@@ -139,9 +165,6 @@ export async function getSessionTokenCount(
   jid: string,
   sessionId: string,
 ): Promise<number> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const result = await db
     .select({
       total: sql<number>`SUM(${conversationHistory.tokenCount})`,
@@ -150,6 +173,7 @@ export async function getSessionTokenCount(
     .where(
       and(
         eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
         sql`${conversationHistory.tokenCount} IS NOT NULL`,
       ),
     );
@@ -161,15 +185,17 @@ export async function getSessionMessageCount(
   jid: string,
   sessionId: string,
 ): Promise<number> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const result = await db
     .select({
       count: sql<number>`COUNT(*)`,
     })
     .from(conversationHistory)
-    .where(eq(conversationHistory.sessionId, sessionId));
+    .where(
+      and(
+        eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
+      ),
+    );
 
   return result[0]?.count ?? 0;
 }
@@ -178,15 +204,17 @@ export async function getSessionLastTimestamp(
   jid: string,
   sessionId: string,
 ): Promise<string | null> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const result = await db
     .select({
       createdAt: conversationHistory.createdAt,
     })
     .from(conversationHistory)
-    .where(eq(conversationHistory.sessionId, sessionId))
+    .where(
+      and(
+        eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
+      ),
+    )
     .orderBy(sql`${conversationHistory.id} DESC`)
     .limit(1);
 
@@ -195,39 +223,37 @@ export async function getSessionLastTimestamp(
 
 export async function replaceSessionMessages(
   jid: string,
+  agentId: string,
   sessionId: string,
   messages: ModelMessage[],
 ): Promise<void> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   const now = new Date().toISOString();
 
-  // Delete existing messages and insert new ones in a transaction
-  const sqlite = db.$client;
-  const transaction = sqlite.transaction(() => {
-    db.delete(conversationHistory)
-      .where(eq(conversationHistory.sessionId, sessionId))
-      .run();
+  // Delete existing messages
+  await db
+    .delete(conversationHistory)
+    .where(
+      and(
+        eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
+      ),
+    );
 
-    for (const message of messages) {
-      const { role, content, toolCalls, toolResults } =
-        serializeMessage(message);
-      db.insert(conversationHistory)
-        .values({
-          sessionId,
-          role,
-          content,
-          toolCalls,
-          toolResults,
-          tokenCount: null,
-          createdAt: now,
-        })
-        .run();
-    }
-  });
-
-  transaction();
+  // Insert new messages
+  for (const message of messages) {
+    const { role, content, toolCalls, toolResults } = serializeMessage(message);
+    await db.insert(conversationHistory).values({
+      sessionId,
+      jid,
+      agentId,
+      role,
+      content,
+      toolCalls,
+      toolResults,
+      tokenCount: null,
+      createdAt: now,
+    });
+  }
 }
 
 export async function markMessageCompacted(
@@ -235,9 +261,6 @@ export async function markMessageCompacted(
   sessionId: string,
   upToId: number,
 ): Promise<void> {
-  const dbPath = getSessionDbPath(jid);
-  const db = await getSessionDb(dbPath);
-
   await db
     .update(conversationHistory)
     .set({
@@ -247,6 +270,7 @@ export async function markMessageCompacted(
     .where(
       and(
         eq(conversationHistory.sessionId, sessionId),
+        eq(conversationHistory.jid, jid),
         eq(conversationHistory.id, upToId),
         sql`(${conversationHistory.isCompacted} IS NULL OR ${conversationHistory.isCompacted} = FALSE)`,
       ),
