@@ -10,9 +10,12 @@ import {
   getTaskById,
   updateTask,
   setRoute,
+  getAllAgents,
+  setAgent,
 } from '../../db.js';
 import { Agent } from '../../types.js';
-import { resolveAgentId, setRouteInMemory } from '../../router.js';
+import { resolveAgentId, isNoReply } from '../../router.js';
+import { getAvailableModels, isModelConfigured } from '../model-config.js';
 
 export interface NanoClawContext {
   chatJid: string;
@@ -22,11 +25,72 @@ export interface NanoClawContext {
 
 export interface NanoClawDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
-  registerAgent: (id: string, agent: Agent) => void;
-  getRegisteredAgents: () => Record<string, Agent>;
 }
 
-function formatTaskList(tasks: ReturnType<typeof getAllTasks>): string {
+async function createOrUpdateAgent(
+  deps: NanoClawDeps,
+  ctx: NanoClawContext,
+  input: {
+    id: string;
+    name: string;
+    folder: string;
+    trigger: string;
+    modelProvider?: string;
+    modelName?: string;
+  },
+) {
+  if (!ctx.isMain) {
+    return { error: 'Only the main agent can create or update agents.' };
+  }
+
+  const hasProvider = !!input.modelProvider;
+  const hasModel = !!input.modelName;
+  if (hasProvider !== hasModel) {
+    return {
+      error:
+        'Model selection must include both modelProvider and modelName.\n\nAvailable models:\n' +
+        formatAvailableModels(),
+    };
+  }
+
+  if (
+    input.modelProvider &&
+    input.modelName &&
+    !isModelConfigured(input.modelProvider, input.modelName)
+  ) {
+    return {
+      error:
+        `Invalid model selection: ${input.modelProvider}:${input.modelName}.\n\nAvailable models:\n` +
+        formatAvailableModels(),
+    };
+  }
+
+  const agents = await getAllAgents();
+
+  const existingAgent = agents[input.id];
+
+  const agent: Agent = {
+    id: input.id,
+    name: input.name,
+    folder: input.folder,
+    trigger: input.trigger,
+    added_at: existingAgent?.added_at ?? new Date().toISOString(),
+    modelProvider: input.modelProvider,
+    modelName: input.modelName,
+  };
+
+  setAgent(input.id, agent);
+
+  const action = existingAgent ? 'updated' : 'created';
+  return {
+    ok: true,
+    message: `Agent "${input.name}" ${action}. Add a route via add_route to connect JIDs to this agent.`,
+  };
+}
+
+function formatTaskList(
+  tasks: Awaited<ReturnType<typeof getAllTasks>>,
+): string {
   return tasks
     .map(
       (t) =>
@@ -35,7 +99,21 @@ function formatTaskList(tasks: ReturnType<typeof getAllTasks>): string {
     .join('\n');
 }
 
-function scheduleTask(
+function formatAvailableModels(): string {
+  const models = getAvailableModels();
+  if (models.length === 0) {
+    return 'No models configured.';
+  }
+
+  return models
+    .map(
+      (m) =>
+        `- ${m.provider}:${m.modelName} (context=${m.contextWindow}, vision=${m.supportsVision ? 'yes' : 'no'})`,
+    )
+    .join('\n');
+}
+
+async function scheduleTask(
   deps: NanoClawDeps,
   ctx: NanoClawContext,
   args: {
@@ -45,7 +123,9 @@ function scheduleTask(
     context_mode?: 'group' | 'isolated';
     target_jid?: string;
   },
-): { ok: boolean; message: string } {
+): Promise<{ ok: boolean; message: string; normalizedScheduleValue?: string }> {
+  let normalizedScheduleValue = args.schedule_value;
+
   if (args.schedule_type === 'cron') {
     try {
       CronExpressionParser.parse(args.schedule_value);
@@ -56,13 +136,43 @@ function scheduleTask(
       };
     }
   } else if (args.schedule_type === 'interval') {
-    const ms = parseInt(args.schedule_value, 10);
+    // Parse duration strings like "30m", "1h", "2d" or plain milliseconds
+    const durationValue = args.schedule_value.trim();
+    const durationMatch = durationValue.match(/^(\d+)\s*([smhd])?$/i);
+    let ms: number;
+
+    if (durationMatch) {
+      const num = parseInt(durationMatch[1], 10);
+      const unit = (durationMatch[2] || 's').toLowerCase();
+      switch (unit) {
+        case 's':
+          ms = num * 1000;
+          break;
+        case 'm':
+          ms = num * 60 * 1000;
+          break;
+        case 'h':
+          ms = num * 60 * 60 * 1000;
+          break;
+        case 'd':
+          ms = num * 24 * 60 * 60 * 1000;
+          break;
+        default:
+          ms = num;
+      }
+    } else {
+      ms = parseInt(durationValue, 10);
+    }
+
     if (isNaN(ms) || ms <= 0) {
       return {
         ok: false,
-        message: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).`,
+        message: `Invalid interval: "${args.schedule_value}". Use format like "30m" (30 minutes), "1h" (1 hour), "2d" (2 days), or milliseconds like "300000" (5 min).`,
       };
     }
+
+    // Store normalized milliseconds
+    normalizedScheduleValue = String(ms);
   } else if (args.schedule_type === 'once') {
     const date = new Date(args.schedule_value);
     if (isNaN(date.getTime())) {
@@ -77,7 +187,7 @@ function scheduleTask(
     ctx.isMain && args.target_jid ? args.target_jid : ctx.chatJid;
 
   // Check that target JID has a route
-  const targetAgentId = resolveAgentId(targetJid);
+  const targetAgentId = await resolveAgentId(targetJid);
   if (!targetAgentId) {
     return {
       ok: false,
@@ -99,10 +209,13 @@ function scheduleTask(
     });
     nextRun = interval.next().toISOString();
   } else if (args.schedule_type === 'interval') {
-    const ms = parseInt(args.schedule_value, 10);
+    // Use the normalized milliseconds value directly
+    const ms = parseInt(normalizedScheduleValue, 10);
     nextRun = new Date(Date.now() + ms).toISOString();
   } else if (args.schedule_type === 'once') {
-    nextRun = new Date(args.schedule_value).toISOString();
+    // Use schedule_value directly as the target time (no timezone conversion)
+    // User provides time in their desired timezone, we store as-is
+    nextRun = args.schedule_value;
   }
 
   const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -117,7 +230,7 @@ function scheduleTask(
     chat_jid: targetJid,
     prompt: args.prompt,
     schedule_type: args.schedule_type,
-    schedule_value: args.schedule_value,
+    schedule_value: normalizedScheduleValue,
     context_mode: contextMode,
     next_run: nextRun,
     status: 'active',
@@ -127,6 +240,7 @@ function scheduleTask(
   return {
     ok: true,
     message: `Task scheduled (${taskId}): ${args.schedule_type} - ${args.schedule_value}`,
+    normalizedScheduleValue,
   };
 }
 
@@ -139,6 +253,9 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         sender: z.string().optional().describe('Optional sender identity'),
       }),
       execute: async (input: { text: string; sender?: string }) => {
+        if (isNoReply(input.text)) {
+          return { ok: true, message: 'Message suppressed (NO_REPLY).' };
+        }
         await deps.sendMessage(ctx.chatJid, input.text, input.sender);
         return { ok: true, message: 'Message sent.' };
       },
@@ -161,7 +278,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         context_mode?: 'group' | 'isolated';
         target_jid?: string;
       }) => {
-        const result = scheduleTask(deps, ctx, input);
+        const result = await scheduleTask(deps, ctx, input);
         if (!result.ok) {
           return { error: result.message };
         }
@@ -173,7 +290,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         "List scheduled tasks. From main: shows all tasks. From other agents: shows only that agent's tasks.",
       inputSchema: z.object({}).optional(),
       execute: async () => {
-        const allTasks = getAllTasks();
+        const allTasks = await getAllTasks();
         const tasks = ctx.isMain
           ? allTasks
           : allTasks.filter((t) => t.agent_id === ctx.agentId);
@@ -187,7 +304,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
       description: 'Pause a scheduled task.',
       inputSchema: z.object({ task_id: z.string().describe('Task ID') }),
       execute: async (input: { task_id: string }) => {
-        const task = getTaskById(input.task_id);
+        const task = await getTaskById(input.task_id);
         if (!task) {
           return { error: 'Task not found.' };
         }
@@ -202,7 +319,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
       description: 'Resume a scheduled task.',
       inputSchema: z.object({ task_id: z.string().describe('Task ID') }),
       execute: async (input: { task_id: string }) => {
-        const task = getTaskById(input.task_id);
+        const task = await getTaskById(input.task_id);
         if (!task) {
           return { error: 'Task not found.' };
         }
@@ -217,7 +334,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
       description: 'Cancel and delete a scheduled task.',
       inputSchema: z.object({ task_id: z.string().describe('Task ID') }),
       execute: async (input: { task_id: string }) => {
-        const task = getTaskById(input.task_id);
+        const task = await getTaskById(input.task_id);
         if (!task) {
           return { error: 'Task not found.' };
         }
@@ -231,37 +348,64 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         };
       },
     }),
-    register_agent: tool({
-      description: 'Register a new agent (main agent only).',
+    create_or_update_agent: tool({
+      description:
+        'Create a new agent or update an existing agent (main agent only).',
       inputSchema: z.object({
         id: z.string().describe('Agent ID (e.g., "coding-agent")'),
         name: z.string().describe('Display name'),
         folder: z.string().describe('Folder name'),
         trigger: z.string().describe('Trigger word'),
+        modelProvider: z
+          .string()
+          .optional()
+          .describe('Optional model provider (for example: "opencode-zen")'),
+        modelName: z
+          .string()
+          .optional()
+          .describe('Optional model name (for example: "gpt-5.3-codex")'),
       }),
       execute: async (input: {
         id: string;
         name: string;
         folder: string;
         trigger: string;
-      }) => {
-        if (!ctx.isMain) {
-          return { error: 'Only the main agent can register new agents.' };
-        }
-
-        // Create agent with required id field
-        const agent: Agent = {
-          id: input.id,
-          name: input.name,
-          folder: input.folder,
-          trigger: input.trigger,
-          added_at: new Date().toISOString(),
-        };
-
-        deps.registerAgent(input.id, agent);
+        modelProvider?: string;
+        modelName?: string;
+      }) => createOrUpdateAgent(deps, ctx, input),
+    }),
+    register_agent: tool({
+      description:
+        'Deprecated alias for create_or_update_agent. Create a new agent or update an existing agent (main agent only).',
+      inputSchema: z.object({
+        id: z.string().describe('Agent ID (e.g., "coding-agent")'),
+        name: z.string().describe('Display name'),
+        folder: z.string().describe('Folder name'),
+        trigger: z.string().describe('Trigger word'),
+        modelProvider: z
+          .string()
+          .optional()
+          .describe('Optional model provider (for example: "opencode-zen")'),
+        modelName: z
+          .string()
+          .optional()
+          .describe('Optional model name (for example: "gpt-5.3-codex")'),
+      }),
+      execute: async (input: {
+        id: string;
+        name: string;
+        folder: string;
+        trigger: string;
+        modelProvider?: string;
+        modelName?: string;
+      }) => createOrUpdateAgent(deps, ctx, input),
+    }),
+    list_models: tool({
+      description: 'List available model selections for agents.',
+      inputSchema: z.object({}).optional(),
+      execute: async () => {
         return {
-          ok: true,
-          message: `Agent "${input.name}" registered. Add a route via add_route to connect JIDs to this agent.`,
+          message: `Available models:\n${formatAvailableModels()}`,
         };
       },
     }),
@@ -282,13 +426,12 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         }
 
         // Verify agent exists
-        const agents = deps.getRegisteredAgents();
+        const agents = await getAllAgents();
         if (!agents[input.agent_id]) {
           return { error: `Agent "${input.agent_id}" not found.` };
         }
 
         // Add route in-memory and persist to database
-        setRouteInMemory(input.jid, input.agent_id);
         setRoute(input.jid, input.agent_id);
         return {
           ok: true,
@@ -300,7 +443,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
       description: 'List all registered agents.',
       inputSchema: z.object({}).optional(),
       execute: async () => {
-        const agents = deps.getRegisteredAgents();
+        const agents = await getAllAgents();
         const agentList = Object.values(agents)
           .map((a) => `- ${a.id}: ${a.name} (trigger: ${a.trigger})`)
           .join('\n');

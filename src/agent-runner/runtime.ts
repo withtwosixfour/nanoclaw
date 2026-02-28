@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { createOpenAI } from '@ai-sdk/openai';
 import path from 'path';
 import {
   streamText,
@@ -12,24 +13,31 @@ import {
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
-import { AGENTS_DIR, SESSIONS_DIR } from '../config.js';
-import { readEnvFile } from '../env.js';
-import { logger } from '../logger.js';
-import { Agent } from '../types.js';
-import { createToolRegistry } from './tool-registry.js';
-import { getCompactionThreshold, getModelConfig } from './model-config.js';
+import { AGENTS_DIR, SESSIONS_DIR } from '../config';
+import { logger } from '../logger';
+import { Agent } from '../types';
+import { createToolRegistry } from './tool-registry';
+import {
+  getCompactionThreshold,
+  getModelConfig,
+  isModelConfigured,
+  listAvailableModelKeys,
+  ModelConfig,
+} from './model-config';
 import {
   getOrCreateSessionId,
   getSessionTokenCount,
   loadMessages,
-  replaceSessionMessages,
   saveMessage,
-} from './session-store.js';
-import { getRouteInfo } from '../router.js';
+  replaceSessionMessages,
+} from './session-store';
+import { truncateOutput } from '../context/truncate';
+import { getRouteInfo } from '../router';
 import {
   detectAndLoadImages,
   extractImagePathsFromMediaNotes,
-} from '../attachments/images.js';
+} from '../attachments/images';
+import { pruneToolOutputs } from '../context/prune';
 
 const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
 const DEFAULT_MODEL_NAME = 'kimi-k2.5';
@@ -52,7 +60,7 @@ export interface AgentOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
-  pendingImageAttachments?: Array<{
+  pendingAttachments?: Array<{
     filePath: string;
     caption: string;
   }>;
@@ -67,23 +75,11 @@ export interface AvailableGroup {
 
 export interface AgentRuntimeDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
-  registerAgent: (jid: string, agent: Agent) => void;
-  getRegisteredAgents: () => Record<string, Agent>;
+  getRegisteredAgents: () => Promise<Record<string, Agent>>;
 }
 
 export interface AgentRuntime {
-  run: (
-    input: AgentInput,
-    onOutput?: (output: AgentOutput) => Promise<void>,
-  ) => Promise<AgentOutput>;
-  pipeMessage: (groupJid: string, text: string) => boolean;
-  close: (groupJid: string) => void;
-}
-
-interface PipeState {
-  queue: string[];
-  waiters: Array<(message: string | null) => void>;
-  closed: boolean;
+  run: (input: AgentInput) => Promise<AgentOutput>;
 }
 
 interface AgentSecrets {
@@ -91,15 +87,6 @@ interface AgentSecrets {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_AUTH_TOKEN?: string;
   OPENCODE_ZEN_API_KEY?: string;
-}
-
-function readSecrets(): AgentSecrets {
-  return readEnvFile([
-    'CLAUDE_CODE_OAUTH_TOKEN',
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_AUTH_TOKEN',
-    'OPENCODE_ZEN_API_KEY',
-  ]);
 }
 
 // File watching cache for CLAUDE.md files
@@ -190,21 +177,43 @@ function buildSystemPrompt(agentId: string, isMain: boolean): string {
   return parts.filter(Boolean).join('\n\n');
 }
 
-function createModel(
-  configProvider: string,
-  modelName: string,
-  secrets?: AgentSecrets,
-) {
+function createModel({
+  provider: configProvider,
+  modelName,
+  isOpenAIResponseFormat,
+}: ModelConfig) {
   const hasApiKey =
-    secrets?.OPENCODE_ZEN_API_KEY || process.env.OPENCODE_ZEN_API_KEY
-      ? true
-      : secrets?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY
-        ? true
-        : false;
+    (process.env.OPENCODE_ZEN_API_KEY ?? process.env.ANTHROPIC_API_KEY) !=
+    undefined;
+
+  if (!hasApiKey) {
+    throw new Error(
+      'No API key available for selected model provider. Please configure either OPENCODE_ZEN_API_KEY or ANTHROPIC_API_KEY in your environment.',
+    );
+  }
 
   if (configProvider === 'opencode-zen') {
-    const apiKey =
-      secrets?.OPENCODE_ZEN_API_KEY || process.env.OPENCODE_ZEN_API_KEY;
+    const apiKey = process.env.OPENCODE_ZEN_API_KEY;
+
+    if (!apiKey) {
+      throw new Error(
+        'OPENCODE_ZEN_API_KEY is required for opencode-zen provider',
+      );
+    }
+
+    if (isOpenAIResponseFormat) {
+      logger.debug(
+        { provider: configProvider, modelName, isOpenAIResponseFormat },
+        'Creating openai response format model',
+      );
+
+      const provider = createOpenAI({
+        apiKey: process.env.OPENCODE_ZEN_API_KEY,
+        baseURL: 'https://opencode.ai/zen/v1',
+      });
+
+      return provider.responses(modelName);
+    }
     logger.debug(
       { provider: configProvider, model: modelName, hasApiKey },
       'Creating OpenAI-compatible model',
@@ -224,9 +233,8 @@ function createModel(
       `Unknown provider, falling back to anthropic`,
     );
   }
-  const apiKey = secrets?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
-  const authToken =
-    secrets?.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_AUTH_TOKEN;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
   logger.debug(
     {
       provider: 'anthropic',
@@ -243,17 +251,73 @@ function createModel(
   return provider(modelName);
 }
 
+function validateRequestedModel(input: AgentInput): void {
+  const hasProvider = !!input.modelProvider;
+  const hasModel = !!input.modelName;
+
+  if (hasProvider !== hasModel) {
+    throw new Error(
+      'Model selection must include both modelProvider and modelName.',
+    );
+  }
+
+  if (!hasProvider || !hasModel) {
+    return;
+  }
+
+  const provider = input.modelProvider as string;
+  const modelName = input.modelName as string;
+  if (isModelConfigured(provider, modelName)) {
+    return;
+  }
+
+  const available = listAvailableModelKeys().join(', ');
+  throw new Error(
+    `Invalid model selection: ${provider}:${modelName}. Available models: ${available}`,
+  );
+}
+
+/**
+ * Truncate tool results within a message to prevent context overflow.
+ * This is called in-flight when messages come back from the AI SDK.
+ */
+function truncateToolResultsInMessage(message: ModelMessage): ModelMessage {
+  if (message.role !== 'tool' || !Array.isArray(message.content)) {
+    return message;
+  }
+
+  const truncatedContent = message.content.map((part) => {
+    if (isToolResultPart(part) && typeof part.output === 'string') {
+      const truncateResult = truncateOutput(part.output, {
+        maxLines: 500,
+        maxBytes: 100 * 1024, // 100KB
+        direction: 'head',
+      });
+
+      return {
+        ...part,
+        output: truncateResult.content,
+      } as unknown as ToolResultPart;
+    }
+    return part;
+  });
+
+  return {
+    ...message,
+    content: truncatedContent,
+  } as ModelMessage;
+}
+
 async function runQuery(
   prompt: string,
   sessionId: string,
   input: AgentInput,
-  secrets: AgentSecrets,
   deps: AgentRuntimeDeps,
 ): Promise<{
   newSessionId: string;
   responseText: string;
   usageTokens: number;
-  pendingImageAttachments?: Array<{ filePath: string; caption: string }>;
+  pendingAttachments?: Array<{ filePath: string; caption: string }>;
 }> {
   const queryStartTime = Date.now();
   const config = getModelConfig(input.modelProvider, input.modelName);
@@ -265,19 +329,18 @@ async function runQuery(
       chatJid: input.chatJid,
       provider: config.provider,
       model: config.modelName,
-      maxOutputTokens: config.maxOutputTokens,
       promptLength: prompt.length,
       isScheduledTask: input.isScheduledTask,
     },
     'Starting model query',
   );
 
-  const model = createModel(config.provider, config.modelName, secrets);
+  const model = createModel(config);
 
   const systemPrompt = buildSystemPrompt(input.agentId, input.isMain);
-  const routeInfo = getRouteInfo(input.chatJid);
+  const routeInfo = await getRouteInfo(input.chatJid);
   const routeContext = routeInfo
-    ? `You are operating in the conversation "${routeInfo.jid}" with agent "${routeInfo.agentId}".`
+    ? `You are operating in the conversation "${routeInfo.threadId}" with agent "${routeInfo.agentId}".`
     : `You are operating in the conversation "${input.chatJid}" with agent "${input.agentId}".`;
   const messages: ModelMessage[] = [];
   if (systemPrompt) {
@@ -288,8 +351,12 @@ async function runQuery(
   } else {
     messages.push({ role: 'system', content: routeContext });
   }
-  const loadedMessages = loadMessages(input.chatJid, sessionId);
+  const loadedMessages = await loadMessages(input.chatJid, sessionId);
   messages.push(...loadedMessages);
+
+  // Prepend current datetime to the prompt so model always knows the current time
+  const now = new Date().toISOString();
+  const promptWithDatetime = `[Current date and time: ${now}]\n\n${prompt}`;
 
   // Check if model supports vision and inject images if available
   // Reuse existing config from line 256
@@ -304,7 +371,7 @@ async function runQuery(
     const images = await detectAndLoadImages(prompt);
     if (images.length > 0) {
       userContent = [
-        { type: 'text' as const, text: prompt },
+        { type: 'text' as const, text: promptWithDatetime },
         ...images.map((img) => ({
           type: 'image' as const,
           image: img.base64,
@@ -312,10 +379,10 @@ async function runQuery(
         })),
       ];
     } else {
-      userContent = prompt;
+      userContent = promptWithDatetime;
     }
   } else {
-    userContent = prompt;
+    userContent = promptWithDatetime;
   }
 
   messages.push({ role: 'user', content: userContent });
@@ -346,8 +413,6 @@ async function runQuery(
     },
     nanoclawDeps: {
       sendMessage: deps.sendMessage,
-      registerAgent: deps.registerAgent,
-      getRegisteredAgents: deps.getRegisteredAgents,
     },
   }) as Record<string, any>;
 
@@ -365,6 +430,8 @@ async function runQuery(
   const streamStartTime = Date.now();
   let streamError: Error | null = null;
 
+  logger.debug({ msgs: messages }, 'messages being sent to the stream');
+
   try {
     // Wrap model with reasoning extraction middleware
     const wrappedModel = wrapLanguageModel({
@@ -376,7 +443,21 @@ async function runQuery(
       model: wrappedModel,
       messages,
       tools,
-      maxOutputTokens: config.maxOutputTokens,
+      onError: (event) => {
+        const error = event.error as any;
+        logger.error(
+          {
+            agent: input.agentId,
+            sessionId,
+            error: JSON.stringify(event.error, Object.keys(event.error as any)),
+            chunkCount,
+            model: config.modelName,
+            provider: config.provider,
+          },
+          'Stream failed to process',
+        );
+      },
+      maxOutputTokens: undefined,
       stopWhen: stepCountIs(500),
       onFinish: (event) => {
         responseMessages = event.response.messages ?? [];
@@ -384,11 +465,36 @@ async function runQuery(
         const lastAssistant = responseMessages
           .filter((m) => m.role === 'assistant')
           .pop();
+
+        // Fire and forget - don't block on pruning
+        pruneToolOutputs(input.chatJid, sessionId).catch((err) => {
+          logger.warn({ jid: input.chatJid, sessionId, err }, 'Pruning failed');
+        });
+
+        // Check for mid-stream overflow
+        const threshold = getCompactionThreshold(config);
+        getSessionTokenCount(input.chatJid, sessionId).then((tokenCount) => {
+          const currentTokens = tokenCount + usageTokens;
+          if (currentTokens >= threshold && !activeCompactions.has(sessionId)) {
+            logger.warn(
+              {
+                agent: input.agentId,
+                sessionId,
+                currentTokens,
+                threshold,
+                overflow: currentTokens - threshold,
+              },
+              'Context overflow detected mid-stream',
+            );
+          }
+        });
+
         logger.debug(
           {
             agent: input.agentId,
             sessionId,
             responseMessageCount: responseMessages.length,
+            stepCount: event.stepNumber,
             usageTokens,
             finishReason: event.finishReason,
             responseMessages,
@@ -507,7 +613,7 @@ async function runQuery(
   }
 
   // Save messages to session store
-  saveMessage(
+  await saveMessage(
     input.chatJid,
     sessionId,
     { role: 'user', content: prompt },
@@ -519,7 +625,19 @@ async function runQuery(
     const tokenCount =
       !tokenAssigned && message.role === 'assistant' ? usageTokens : null;
     if (tokenCount != null) tokenAssigned = true;
-    saveMessage(input.chatJid, sessionId, message, tokenCount);
+
+    // Truncate tool results in-flight to prevent context overflow
+    // This happens BEFORE saving, so massive outputs don't bloat the context
+    const truncatedMessage = truncateToolResultsInMessage(message);
+
+    saveMessage(input.chatJid, sessionId, truncatedMessage, tokenCount).catch(
+      (err) => {
+        logger.warn(
+          { jid: input.chatJid, sessionId, err },
+          'Failed to save message',
+        );
+      },
+    );
   }
 
   const totalDuration = Date.now() - queryStartTime;
@@ -537,9 +655,8 @@ async function runQuery(
     'Query completed successfully',
   );
 
-  // Extract pending image attachments from tool results
-  const pendingImageAttachments: Array<{ filePath: string; caption: string }> =
-    [];
+  // Extract pending attachments from tool results
+  const pendingAttachments: Array<{ filePath: string; caption: string }> = [];
 
   for (const message of responseMessages) {
     if (message.role === 'tool') {
@@ -547,33 +664,17 @@ async function runQuery(
       const content = message.content;
       if (Array.isArray(content)) {
         for (const part of content) {
-          if (isToolResultPart(part) && part.toolName === 'SendImage') {
+          if (isToolResultPart(part) && part.toolName === 'SendAttachment') {
             try {
               const result =
                 typeof part.output === 'string'
                   ? JSON.parse(part.output)
                   : part.output;
-              // Handle wrapped output from Vercel AI SDK
-              const actualResult =
-                result?.type === 'json' && result?.value
-                  ? result.value
-                  : result;
-              if (
-                actualResult &&
-                actualResult.success &&
-                actualResult.filePath
-              ) {
-                pendingImageAttachments.push({
-                  filePath: actualResult.filePath,
-                  caption: actualResult.caption || '',
+              if (result && result.value.success && result.value.filePath) {
+                pendingAttachments.push({
+                  filePath: result.value.filePath,
+                  caption: result.value.caption || '',
                 });
-                logger.debug(
-                  {
-                    filePath: actualResult.filePath,
-                    caption: actualResult.caption,
-                  },
-                  'Extracted image attachment from tool result',
-                );
               }
             } catch {
               // Not JSON or invalid format, skip
@@ -588,7 +689,7 @@ async function runQuery(
     newSessionId: sessionId,
     responseText,
     usageTokens,
-    pendingImageAttachments,
+    pendingAttachments,
   };
 }
 
@@ -596,21 +697,18 @@ async function maybeCompactSession(
   input: AgentInput,
   sessionId: string,
   usageTokens: number,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
 
   const currentTokens =
-    getSessionTokenCount(input.chatJid, sessionId) + (usageTokens || 0);
+    (await getSessionTokenCount(input.chatJid, sessionId)) + (usageTokens || 0);
 
   logger.debug(
     {
       agent: input.agentId,
       sessionId,
       contextWindow: config.contextWindow,
-      maxOutputTokens: config.maxOutputTokens,
-      usableTokens: config.contextWindow - config.maxOutputTokens,
       threshold,
       thresholdPercent: config.compactionThresholdPercent,
       currentTokens,
@@ -626,7 +724,7 @@ async function maybeCompactSession(
   if (currentTokens < threshold || activeCompactions.has(sessionId)) return;
 
   activeCompactions.add(sessionId);
-  await compactSession(input, sessionId, secrets);
+  await compactSession(input, sessionId);
   activeCompactions.delete(sessionId);
 }
 
@@ -634,7 +732,6 @@ async function maybeCompactSessionPreflight(
   input: AgentInput,
   sessionId: string,
   promptText: string,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const config = getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
@@ -647,7 +744,8 @@ async function maybeCompactSessionPreflight(
     return;
   }
 
-  const messages = loadMessages(input.chatJid, sessionId);
+  // Load only uncompacted messages
+  const messages = await loadMessages(input.chatJid, sessionId);
   if (messages.length < 4) {
     logger.debug(
       { agent: input.agentId, sessionId, messageCount: messages.length },
@@ -656,6 +754,7 @@ async function maybeCompactSessionPreflight(
     return;
   }
 
+  // Use context module's token estimation
   const estimatedTokens =
     estimateTokenCount(messages) + Math.ceil(promptText.length / 4);
 
@@ -676,8 +775,6 @@ async function maybeCompactSessionPreflight(
       agent: input.agentId,
       sessionId,
       contextWindow: config.contextWindow,
-      maxOutputTokens: config.maxOutputTokens,
-      usableTokens: config.contextWindow - config.maxOutputTokens,
       threshold,
       thresholdPercent: config.compactionThresholdPercent,
       estimatedTokens,
@@ -695,15 +792,34 @@ async function maybeCompactSessionPreflight(
 
   if (totalEstimatedTokens < threshold) return;
 
+  // Re-check after pruning
+  const prunedMessages = await loadMessages(input.chatJid, sessionId);
+  const newEstimate =
+    estimateTokenCount(prunedMessages) +
+    Math.ceil(promptText.length / 4) +
+    estimatedImageTokens;
+
+  if (newEstimate < threshold) {
+    logger.info(
+      {
+        agent: input.agentId,
+        sessionId,
+        before: totalEstimatedTokens,
+        after: newEstimate,
+      },
+      'Pruning avoided compaction',
+    );
+    return;
+  }
+
   activeCompactions.add(sessionId);
-  await compactSession(input, sessionId, secrets);
+  await compactSession(input, sessionId);
   activeCompactions.delete(sessionId);
 }
 
 async function compactSession(
   input: AgentInput,
   sessionId: string,
-  secrets: AgentSecrets,
 ): Promise<void> {
   const compactionStart = Date.now();
   logger.info(
@@ -712,7 +828,7 @@ async function compactSession(
   );
 
   try {
-    const messages = loadMessages(input.chatJid, sessionId);
+    const messages = await loadMessages(input.chatJid, sessionId);
     if (messages.length < 4) {
       logger.debug(
         { agent: input.agentId, sessionId, messageCount: messages.length },
@@ -747,21 +863,8 @@ async function compactSession(
       return;
     }
 
-    logger.info(
-      {
-        agent: input.agentId,
-        sessionId,
-        totalMessages: messages.length,
-        olderMessages: older.length,
-        recentMessages: recent.length,
-      },
-      'Compacting session - archiving and summarizing',
-    );
-
-    archiveConversation(input.chatJid, sessionId, messages);
-
     const config = getModelConfig(input.modelProvider, input.modelName);
-    const model = createModel(config.provider, config.modelName, secrets);
+    const model = createModel(config);
 
     const summaryPrompt = buildSummaryPrompt(older);
     let summaryText = '';
@@ -779,11 +882,11 @@ async function compactSession(
         {
           role: 'system',
           content:
-            'Summarize the earlier conversation for future context. Be concise and preserve key facts, decisions, preferences, and open tasks.',
+            'Provide a detailed summary for continuing our conversation. Focus on information that would be helpful for continuing the conversation, including what we did, what we are doing, which files we are working on, and what we are going to do next.',
         },
         { role: 'user', content: summaryPrompt },
       ],
-      maxOutputTokens: Math.min(2048, config.maxOutputTokens),
+      maxOutputTokens: 2048,
     });
 
     for await (const chunk of summaryResult.textStream) {
@@ -793,14 +896,21 @@ async function compactSession(
 
     const summaryDuration = Date.now() - summaryStreamStart;
 
+    // Create summary message with compaction marker
     const summaryMessage: ModelMessage = {
       role: 'system',
       content: `Summary of earlier conversation:\n${summaryText.trim()}`,
     };
 
-    replaceSessionMessages(input.chatJid, sessionId, [
+    // Filter out tool messages from recent to prevent context overflow
+    // Tool results in recent messages can be massive and cause the prompt to exceed limits
+    // The summary already captures what was done, so we don't need the full tool outputs
+    const filteredRecent = recent.filter((msg) => msg.role !== 'tool');
+
+    // Replace messages: summary + filtered recent (without tool messages)
+    await replaceSessionMessages(input.chatJid, sessionId, [
       summaryMessage,
-      ...recent,
+      ...filteredRecent,
     ]);
 
     const totalDuration = Date.now() - compactionStart;
@@ -828,6 +938,8 @@ async function compactSession(
       },
       'Compaction failed',
     );
+
+    throw err;
   }
 }
 
@@ -1011,77 +1123,10 @@ function isToolResultPart(part: unknown): part is ToolResultPart {
   );
 }
 
-function buildPipeState(): PipeState {
-  return { queue: [], waiters: [], closed: false };
-}
-
-function drainPipe(pipe: PipeState): string[] {
-  if (pipe.queue.length === 0) return [];
-  const messages = pipe.queue.slice();
-  pipe.queue = [];
-  return messages;
-}
-
-function waitForPipeMessage(pipe: PipeState): Promise<string | null> {
-  if (pipe.closed) return Promise.resolve(null);
-  if (pipe.queue.length > 0) {
-    const next = pipe.queue.shift() || null;
-    return Promise.resolve(next);
-  }
-  return new Promise((resolve) => {
-    pipe.waiters.push(resolve);
-  });
-}
-
-function enqueuePipeMessage(pipe: PipeState, message: string): void {
-  if (pipe.closed) return;
-  if (pipe.waiters.length > 0) {
-    const resolve = pipe.waiters.shift();
-    resolve?.(message);
-    return;
-  }
-  pipe.queue.push(message);
-}
-
-function closePipe(pipe: PipeState): void {
-  pipe.closed = true;
-  while (pipe.waiters.length > 0) {
-    const resolve = pipe.waiters.shift();
-    resolve?.(null);
-  }
-  pipe.queue = [];
-}
-
 export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
-  const pipes = new Map<string, PipeState>();
-  const activeRuns = new Set<string>();
-
-  const getPipe = (groupJid: string): PipeState => {
-    let pipe = pipes.get(groupJid);
-    if (!pipe) {
-      pipe = buildPipeState();
-      pipes.set(groupJid, pipe);
-    }
-    return pipe;
-  };
-
-  const pipeMessage = (groupJid: string, text: string): boolean => {
-    if (!activeRuns.has(groupJid)) return false;
-    enqueuePipeMessage(getPipe(groupJid), text);
-    return true;
-  };
-
-  const close = (groupJid: string): void => {
-    closePipe(getPipe(groupJid));
-  };
-
-  const run = async (
-    input: AgentInput,
-    onOutput?: (output: AgentOutput) => Promise<void>,
-  ): Promise<AgentOutput> => {
+  const run = async (input: AgentInput): Promise<AgentOutput> => {
     const startTime = Date.now();
     const runId = `${input.agentId}-${startTime}`;
-    const secrets = readSecrets();
 
     logger.info(
       {
@@ -1096,6 +1141,8 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       },
       'Agent run starting',
     );
+
+    validateRequestedModel(input);
 
     if (!input.modelProvider) input.modelProvider = DEFAULT_MODEL_PROVIDER;
     if (!input.modelName) input.modelName = DEFAULT_MODEL_NAME;
@@ -1113,11 +1160,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     const agentDir = path.join(AGENTS_DIR, input.agentId);
     fs.mkdirSync(agentDir, { recursive: true });
 
-    const pipe = getPipe(input.chatJid);
-    pipe.closed = false;
-    activeRuns.add(input.chatJid);
-
-    let sessionId =
+    const sessionId =
       input.sessionId || getOrCreateSessionId(input.chatJid, input.agentId);
     let prompt = input.prompt;
     if (input.isScheduledTask) {
@@ -1126,137 +1169,18 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         prompt;
     }
 
-    const pending = drainPipe(pipe);
-    if (pending.length > 0) {
-      logger.debug(
-        { runId, agent: input.agentId, count: pending.length },
-        'Draining pending piped messages into initial prompt',
-      );
-      prompt += '\n' + pending.join('\n');
-    }
-
-    // Track the last response in case we need it on error
-    let lastResponse: string | null = null;
-    let hadError = false;
-    let errorMessage = '';
-    let queryCount = 0;
-    const pendingImageAttachments: Array<{
-      filePath: string;
-      caption: string;
-    }> = [];
-
     try {
-      while (true) {
-        queryCount++;
-        logger.info(
-          { runId, agent: input.agentId, sessionId, queryCount },
-          'Starting agent query iteration',
-        );
+      await maybeCompactSessionPreflight(input, sessionId, prompt);
 
-        const queryIterationStart = Date.now();
-        await maybeCompactSessionPreflight(input, sessionId, prompt, secrets);
+      const { responseText, usageTokens, pendingAttachments } = await runQuery(
+        prompt,
+        sessionId,
+        input,
+        deps,
+      );
 
-        const {
-          newSessionId,
-          responseText,
-          usageTokens,
-          pendingImageAttachments: queryAttachments,
-        } = await runQuery(prompt, sessionId, input, secrets, deps);
-        sessionId = newSessionId;
-
-        // Accumulate image attachments from this query iteration
-        if (queryAttachments && queryAttachments.length > 0) {
-          logger.debug(
-            {
-              runId,
-              agent: input.agentId,
-              attachmentCount: queryAttachments.length,
-              attachments: queryAttachments.map((a) => a.filePath),
-            },
-            'Accumulating image attachments from query',
-          );
-          pendingImageAttachments.push(...queryAttachments);
-        }
-
-        const queryIterationDuration = Date.now() - queryIterationStart;
-        logger.info(
-          {
-            runId,
-            agent: input.agentId,
-            sessionId,
-            queryCount,
-            queryDurationMs: queryIterationDuration,
-            responseLength: responseText.length,
-            usageTokens,
-          },
-          'Query iteration completed',
-        );
-
-        // Store this response and emit it immediately
-        if (responseText) {
-          lastResponse = responseText;
-          if (onOutput) {
-            logger.debug(
-              {
-                runId,
-                agent: input.agentId,
-                responseLength: responseText.length,
-                attachmentCount: pendingImageAttachments.length,
-              },
-              'Calling onOutput callback with response',
-            );
-            await onOutput({
-              status: 'success',
-              result: responseText,
-              newSessionId: sessionId,
-              pendingImageAttachments,
-            });
-            logger.debug(
-              { runId, agent: input.agentId },
-              'onOutput callback completed',
-            );
-          }
-        }
-
-        void maybeCompactSession(input, sessionId, usageTokens, secrets);
-
-        const nextMessage = await waitForPipeMessage(pipe);
-        if (nextMessage === null) {
-          logger.info(
-            {
-              runId,
-              agent: input.agentId,
-              durationMs: Date.now() - startTime,
-              queryCount,
-            },
-            'Agent run closed - no more piped messages',
-          );
-          break;
-        }
-        prompt = nextMessage;
-        logger.debug(
-          {
-            runId,
-            agent: input.agentId,
-            nextMessageLength: nextMessage.length,
-          },
-          'Received piped message for next iteration',
-        );
-      }
-
-      // Send completion marker
-      if (onOutput) {
-        logger.debug(
-          { runId, agent: input.agentId },
-          'Sending completion marker',
-        );
-        await onOutput({
-          status: 'success',
-          result: null,
-          newSessionId: sessionId,
-          pendingImageAttachments,
-        });
-      }
+      // Trigger compaction asynchronously after response
+      void maybeCompactSession(input, sessionId, usageTokens);
 
       const totalDuration = Date.now() - startTime;
       logger.info(
@@ -1264,67 +1188,42 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           runId,
           agent: input.agentId,
           totalDurationMs: totalDuration,
-          queryCount,
-          finalSessionId: sessionId,
-          resultLength: lastResponse?.length || 0,
+          responseLength: responseText.length,
+          sessionId,
         },
         'Agent run completed successfully',
       );
 
       return {
         status: 'success',
-        result: lastResponse,
+        result: responseText,
         newSessionId: sessionId,
-        pendingImageAttachments,
+        pendingAttachments,
       };
     } catch (err) {
-      errorMessage = err instanceof Error ? err.message : String(err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
       const errorStack = err instanceof Error ? err.stack : undefined;
-      hadError = true;
+
       logger.error(
         {
           runId,
           agent: input.agentId,
           error: errorMessage,
           stack: errorStack,
-          queryCount,
           durationMs: Date.now() - startTime,
           sessionId,
         },
         'Agent run error',
       );
-    } finally {
-      activeRuns.delete(input.chatJid);
-      closePipe(pipe);
-      logger.debug(
-        { runId, agent: input.agentId, activeRunsCount: activeRuns.size },
-        'Cleaned up agent run',
-      );
-    }
 
-    // Handle error case - send the last response we got before the error
-    if (hadError) {
-      const output: AgentOutput = {
+      return {
         status: 'error',
-        result: lastResponse,
+        result: null,
         newSessionId: sessionId,
         error: errorMessage,
       };
-      logger.info(
-        { runId, agent: input.agentId, hasPartialResult: !!lastResponse },
-        'Sending error output with partial result',
-      );
-      if (onOutput) await onOutput(output);
-      return output;
     }
-
-    // This line is unreachable but satisfies TypeScript
-    return {
-      status: 'success',
-      result: null,
-      newSessionId: sessionId,
-    };
   };
 
-  return { run, pipeMessage, close };
+  return { run };
 }

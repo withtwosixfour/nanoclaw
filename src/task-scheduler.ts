@@ -16,23 +16,15 @@ import {
   logTaskRun,
   updateTaskAfterRun,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { Agent, ScheduledTask } from './types.js';
+import { isNoReply } from './router.js';
 
 export interface SchedulerDependencies {
-  agents: () => Record<string, Agent>;
-  getSessions: () => Record<string, string>;
-  queue: GroupQueue;
-  runAgent: (
-    input: AgentInput,
-    onOutput?: (output: AgentOutput) => Promise<void>,
-  ) => Promise<AgentOutput>;
-  sendMessage: (
-    jid: string,
-    text: string,
-    attachments?: string[],
-  ) => Promise<void>;
+  agents: () => Promise<Record<string, Agent>>;
+  getSessions: () => Promise<Record<string, string>>;
+  runAgent: (input: AgentInput) => Promise<AgentOutput>;
+  sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
 async function runTask(
@@ -46,7 +38,7 @@ async function runTask(
     'Running scheduled task',
   );
 
-  const agents = deps.agents();
+  const agents = await deps.agents();
   const agent = agents[task.agent_id];
 
   if (!agent) {
@@ -70,58 +62,33 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the JID's current session
-  const sessions = deps.getSessions();
+  // For group context mode, use the thread's current session
+  const sessions = await deps.getSessions();
+  // Use thread_id if available (new format), otherwise fall back to chat_jid (legacy)
+  const threadId = task.thread_id || task.chat_jid;
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.chat_jid] : undefined;
-
-  // Idle timer: closes the active run after IDLE_TIMEOUT of no output.
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug(
-        { taskId: task.id },
-        'Scheduled task idle timeout, closing agent run',
-      );
-      deps.queue.closeStdin(task.chat_jid);
-    }, IDLE_TIMEOUT);
-  };
+    task.context_mode === 'group' ? sessions[threadId] : undefined;
 
   try {
-    const output = await deps.runAgent(
-      {
-        prompt: task.prompt,
-        sessionId,
-        agentId: task.agent_id,
-        chatJid: task.chat_jid,
-        isMain,
-        isScheduledTask: true,
-        modelProvider: agent.modelProvider,
-        modelName: agent.modelName,
-      },
-      async (streamedOutput: AgentOutput) => {
-        if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (middleware extracts reasoning; sendMessage is safety net)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          // Only reset idle timer on actual results, not session-update markers
-          resetIdleTimer();
-        }
-        if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
-        }
-      },
-    );
-
-    if (idleTimer) clearTimeout(idleTimer);
+    const output = await deps.runAgent({
+      prompt: task.prompt,
+      sessionId,
+      agentId: task.agent_id,
+      chatJid: threadId,
+      isMain,
+      isScheduledTask: true,
+      modelProvider: agent.modelProvider,
+      modelName: agent.modelName,
+    });
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.result) {
-      // Messages are sent via MCP tool (IPC), result text is just logged
       result = output.result;
+      // Forward result to user unless it's a NO_REPLY marker
+      if (!isNoReply(output.result)) {
+        await deps.sendMessage(threadId, output.result);
+      }
     }
 
     logger.info(
@@ -129,7 +96,6 @@ async function runTask(
       'Task completed',
     );
   } catch (err) {
-    if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
@@ -152,8 +118,12 @@ async function runTask(
     });
     nextRun = interval.next().toISOString();
   } else if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    nextRun = new Date(Date.now() + ms).toISOString();
+    // schedule_value is stored as normalized milliseconds
+    const ms = parseInt(task.schedule_value.trim(), 10);
+
+    if (!isNaN(ms) && ms > 0) {
+      nextRun = new Date(Date.now() + ms).toISOString();
+    }
   }
   // 'once' tasks have no next run
 
@@ -177,22 +147,28 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
-      const dueTasks = getDueTasks();
+      logger.debug('Scheduler loop iteration starting');
+      const dueTasks = await getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');
       }
 
       for (const task of dueTasks) {
         // Re-check task status in case it was paused/cancelled
-        const currentTask = getTaskById(task.id);
+        const currentTask = await getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
-        );
+        // Run task directly (no queue needed for simplified runtime)
+        runTask(currentTask, deps).catch((err) => {
+          logger.error(
+            { taskId: currentTask.id, err },
+            'Task execution failed',
+          );
+        });
       }
+      logger.debug('Scheduler loop iteration completed');
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
     }

@@ -24,7 +24,7 @@ export async function runMigration(): Promise<void> {
   const migrationKey = 'migration_v2_complete';
 
   // Check if migration already ran
-  if (getRouterState(migrationKey) === 'true') {
+  if ((await getRouterState(migrationKey)) === 'true') {
     logger.debug('Migration v2 already completed');
     return;
   }
@@ -107,7 +107,7 @@ export async function runMigration(): Promise<void> {
 
   // Load legacy sessions from router_state if available
   const legacySessions = new Map<string, string>(); // folder -> sessionId
-  const legacySessionsJson = getRouterState('legacy_sessions');
+  const legacySessionsJson = await getRouterState('legacy_sessions');
   if (legacySessionsJson) {
     try {
       const sessions = JSON.parse(legacySessionsJson) as Record<string, string>;

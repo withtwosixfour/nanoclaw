@@ -37,7 +37,8 @@ export interface NewMessage {
 export interface ScheduledTask {
   id: string;
   agent_id: string; // Changed from group_folder - which agent handles this task
-  chat_jid: string; // Target JID for output
+  chat_jid: string; // DEPRECATED: Use thread_id instead
+  thread_id?: string; // NEW: Chat SDK thread ID (e.g., "discord:123:456")
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
