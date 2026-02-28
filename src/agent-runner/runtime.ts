@@ -359,7 +359,8 @@ async function runQuery(
   const promptWithDatetime = `[Current date and time: ${now}]\n\n${prompt}`;
 
   // Check if model supports vision and inject images if available
-  // Scan both current prompt AND loaded messages for media notes
+  // Images from user attachments are detected via media notes in the prompt
+  // Images from tool reads are handled via experimental_toToolResultContent
   let userContent:
     | string
     | Array<
@@ -368,19 +369,7 @@ async function runQuery(
       >;
 
   if (config.supportsVision) {
-    // Extract all content from loaded messages to scan for media notes
-    const allContentParts: string[] = [];
-    for (const msg of loadedMessages) {
-      const content = extractContentTextForImageScan(msg);
-      if (content) {
-        allContentParts.push(content);
-      }
-    }
-    // Add current prompt
-    allContentParts.push(promptWithDatetime);
-    const combinedContent = allContentParts.join('\n');
-
-    const images = await detectAndLoadImages(combinedContent);
+    const images = await detectAndLoadImages(prompt);
     if (images.length > 0) {
       userContent = [
         { type: 'text' as const, text: promptWithDatetime },
@@ -1133,36 +1122,6 @@ function isToolResultPart(part: unknown): part is ToolResultPart {
     typeof (part as { toolName?: unknown }).toolName === 'string' &&
     typeof (part as { toolCallId?: unknown }).toolCallId === 'string'
   );
-}
-
-/**
- * Extract text content from a message for image scanning.
- * This is used to find media notes in tool results and message content.
- */
-function extractContentTextForImageScan(message: ModelMessage): string | null {
-  const content = message.content;
-  if (typeof content === 'string') return content;
-  if (!content) return null;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (isTextPart(part)) {
-          return part.text ?? '';
-        }
-        if (isToolResultPart(part)) {
-          if (typeof part.output === 'string') return part.output;
-          try {
-            return JSON.stringify(part.output);
-          } catch {
-            return String(part.output ?? '');
-          }
-        }
-        return '';
-      })
-      .join('')
-      .trim();
-  }
-  return String(content);
 }
 
 export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {

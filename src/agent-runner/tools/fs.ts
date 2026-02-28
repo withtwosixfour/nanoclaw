@@ -1,4 +1,5 @@
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import fg from 'fast-glob';
 import { z } from 'zod';
@@ -53,21 +54,21 @@ export function createFsTools(ctx: WorkspaceContext) {
           return { entries };
         }
 
-        const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
-
-        // Check if this is an image file
+        // Check if this is an image file - read as buffer for base64
         if (isImageFile(resolved.resolvedPath)) {
           const mimeType = getMimeTypeFromExtension(resolved.resolvedPath);
+          const buffer = await fsPromises.readFile(resolved.resolvedPath);
+          const base64 = buffer.toString('base64');
+
           return {
-            content: `[media attached: ${resolved.resolvedPath} (${mimeType})]`,
-            totalLines: 1,
-            offset: 1,
-            isImage: true,
+            content: `[Image: ${path.basename(resolved.resolvedPath)} (${mimeType}, ${buffer.length} bytes)]`,
+            base64,
             mimeType,
             path: resolved.resolvedPath,
           };
         }
 
+        const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
         const lines = content.split('\n');
         const offset = Math.max((input.offset || 1) - 1, 0);
         const limit = input.limit ?? lines.length;
@@ -77,6 +78,51 @@ export function createFsTools(ctx: WorkspaceContext) {
           totalLines: lines.length,
           offset: offset + 1,
         };
+      },
+      // Map tool result to AI SDK content parts - enables image support
+      experimental_toToolResultContent: (result) => {
+        // If the result has base64 image data, return as image content part
+        if (result.base64 && result.mimeType) {
+          return [
+            {
+              type: 'text',
+              text: result.content,
+            },
+            {
+              type: 'image',
+              data: result.base64,
+              mimeType: result.mimeType,
+            },
+          ];
+        }
+
+        // For directories, return the entries as text
+        if (result.entries) {
+          return [
+            {
+              type: 'text',
+              text: result.entries.join('\n'),
+            },
+          ];
+        }
+
+        // For errors, return error text
+        if (result.error) {
+          return [
+            {
+              type: 'text',
+              text: `Error: ${result.error}`,
+            },
+          ];
+        }
+
+        // Default: return content as text
+        return [
+          {
+            type: 'text',
+            text: result.content || '',
+          },
+        ];
       },
     }),
     Write: tool({
