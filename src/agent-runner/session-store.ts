@@ -229,31 +229,34 @@ export async function replaceSessionMessages(
 ): Promise<void> {
   const now = new Date().toISOString();
 
-  // Delete existing messages
-  await db
-    .delete(conversationHistory)
-    .where(
-      and(
-        eq(conversationHistory.sessionId, sessionId),
-        eq(conversationHistory.jid, jid),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    // Delete existing messages
+    await tx
+      .delete(conversationHistory)
+      .where(
+        and(
+          eq(conversationHistory.sessionId, sessionId),
+          eq(conversationHistory.jid, jid),
+        ),
+      );
 
-  // Insert new messages
-  for (const message of messages) {
-    const { role, content, toolCalls, toolResults } = serializeMessage(message);
-    await db.insert(conversationHistory).values({
-      sessionId,
-      jid,
-      agentId,
-      role,
-      content,
-      toolCalls,
-      toolResults,
-      tokenCount: null,
-      createdAt: now,
-    });
-  }
+    // Insert new messages
+    for (const message of messages) {
+      const { role, content, toolCalls, toolResults } =
+        serializeMessage(message);
+      await tx.insert(conversationHistory).values({
+        sessionId,
+        jid,
+        agentId,
+        role,
+        content,
+        toolCalls,
+        toolResults,
+        tokenCount: null,
+        createdAt: now,
+      });
+    }
+  });
 }
 
 export async function markMessageCompacted(

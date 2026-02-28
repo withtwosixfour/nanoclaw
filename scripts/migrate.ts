@@ -1,7 +1,7 @@
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql/node';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -133,12 +133,11 @@ export async function migrateSessionDataToMainDb(): Promise<void> {
     }
 
     // Check if we already have data for this session in main DB
-    const existingResult = await mainDb
-      .select({ count: mainSchema.conversationHistory.id })
+    const existingCount = await mainDb
+      .select({ count: sql<number>`COUNT(*)` })
       .from(mainSchema.conversationHistory)
-      .where(eq(mainSchema.conversationHistory.sessionId, sessionId));
-
-    const existingCount = existingResult.length;
+      .where(eq(mainSchema.conversationHistory.sessionId, sessionId))
+      .then((rows) => rows[0]?.count ?? 0);
 
     if (existingCount > 0) {
       logger.info(
@@ -165,25 +164,27 @@ export async function migrateSessionDataToMainDb(): Promise<void> {
         continue;
       }
 
-      // Insert into main DB
-      for (const row of rows) {
-        await mainDb.insert(mainSchema.conversationHistory).values({
-          sessionId: row.sessionId,
-          jid: jid,
-          agentId: agentId,
-          role: row.role as 'user' | 'assistant' | 'system' | 'tool',
-          content: row.content,
-          toolCalls: row.toolCalls,
-          toolResults: row.toolResults,
-          tokenCount: row.tokenCount,
-          createdAt: row.createdAt,
-          isCompacted: row.isCompacted,
-          compactedAt: row.compactedAt,
-          isCompactedSummary: row.isCompactedSummary,
-          provider: row.provider,
-          model: row.model,
-        });
-      }
+      // Insert into main DB within a transaction for atomicity
+      await mainDb.transaction(async (tx) => {
+        for (const row of rows) {
+          await tx.insert(mainSchema.conversationHistory).values({
+            sessionId: row.sessionId,
+            jid: jid,
+            agentId: agentId,
+            role: row.role as 'user' | 'assistant' | 'system' | 'tool',
+            content: row.content,
+            toolCalls: row.toolCalls,
+            toolResults: row.toolResults,
+            tokenCount: row.tokenCount,
+            createdAt: row.createdAt,
+            isCompacted: row.isCompacted,
+            compactedAt: row.compactedAt,
+            isCompactedSummary: row.isCompactedSummary,
+            provider: row.provider,
+            model: row.model,
+          });
+        }
+      });
 
       logger.info(
         { jid, sessionId, migratedCount: rows.length, agentId },
