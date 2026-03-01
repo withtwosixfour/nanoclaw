@@ -77,6 +77,12 @@ export interface AvailableGroup {
 export interface AgentRuntimeDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
   getRegisteredAgents: () => Promise<Record<string, Agent>>;
+  schedulerDeps: {
+    agents: () => Promise<Record<string, Agent>>;
+    getSessions: () => Promise<Record<string, string>>;
+    runAgent: (input: AgentInput) => Promise<AgentOutput>;
+    sendMessage: (jid: string, text: string) => Promise<void>;
+  };
 }
 
 export interface AgentRuntime {
@@ -414,6 +420,7 @@ async function runQuery(
     },
     nanoclawDeps: {
       sendMessage: deps.sendMessage,
+      schedulerDeps: deps.schedulerDeps,
     },
   }) as Record<string, any>;
 

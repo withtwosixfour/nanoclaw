@@ -21,6 +21,8 @@ import {
   deleteSession,
   setRouterState,
   getRouterState,
+  getAllAgents,
+  getAllSessions,
 } from './db.js';
 import {
   clearSession,
@@ -523,6 +525,26 @@ const agentRuntime = createAgentRuntime({
     );
   },
   getRegisteredAgents: async () => ({}),
+  schedulerDeps: {
+    agents: async () => await getAllAgents(),
+    getSessions: async () => {
+      const sessions: Record<string, string> = {};
+      const dbSessions = await getAllSessions();
+      for (const [jid, data] of Object.entries(dbSessions)) {
+        sessions[jid] = data.sessionId;
+      }
+      return sessions;
+    },
+    runAgent: async (input: AgentInput) => {
+      return await agentRuntime.run(input);
+    },
+    sendMessage: async (jid: string, text: string) => {
+      logger.warn(
+        { jid, text: text.slice(0, 50) },
+        'Scheduler tried to send message - not implemented in Chat SDK mode',
+      );
+    },
+  },
 });
 
 /**

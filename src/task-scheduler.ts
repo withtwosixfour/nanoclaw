@@ -27,15 +27,16 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
-async function runTask(
+async function executeTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
+  updateSchedule: boolean = true,
 ): Promise<void> {
   const startTime = Date.now();
 
   logger.info(
-    { taskId: task.id, agent: task.agent_id },
-    'Running scheduled task',
+    { taskId: task.id, agent: task.agent_id, manual: !updateSchedule },
+    updateSchedule ? 'Running scheduled task' : 'Running task manually',
   );
 
   const agents = await deps.agents();
@@ -111,28 +112,47 @@ async function runTask(
     error,
   });
 
-  let nextRun: string | null = null;
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, {
-      tz: TIMEZONE,
-    });
-    nextRun = interval.next().toISOString();
-  } else if (task.schedule_type === 'interval') {
-    // schedule_value is stored as normalized milliseconds
-    const ms = parseInt(task.schedule_value.trim(), 10);
+  // Only update schedule if this was a scheduled run (not manual)
+  if (updateSchedule) {
+    let nextRun: string | null = null;
+    if (task.schedule_type === 'cron') {
+      const interval = CronExpressionParser.parse(task.schedule_value, {
+        tz: TIMEZONE,
+      });
+      nextRun = interval.next().toISOString();
+    } else if (task.schedule_type === 'interval') {
+      // schedule_value is stored as normalized milliseconds
+      const ms = parseInt(task.schedule_value.trim(), 10);
 
-    if (!isNaN(ms) && ms > 0) {
-      nextRun = new Date(Date.now() + ms).toISOString();
+      if (!isNaN(ms) && ms > 0) {
+        nextRun = new Date(Date.now() + ms).toISOString();
+      }
     }
-  }
-  // 'once' tasks have no next run
+    // 'once' tasks have no next run
 
-  const resultSummary = error
-    ? `Error: ${error}`
-    : result
-      ? result.slice(0, 200)
-      : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+    const resultSummary = error
+      ? `Error: ${error}`
+      : result
+        ? result.slice(0, 200)
+        : 'Completed';
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  }
+}
+
+// Backward-compatible wrapper for scheduled execution
+async function runTask(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+): Promise<void> {
+  return executeTask(task, deps, true);
+}
+
+// Exported function for manual task execution (does not affect schedule)
+export async function runTaskNow(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+): Promise<void> {
+  return executeTask(task, deps, false);
 }
 
 let schedulerRunning = false;

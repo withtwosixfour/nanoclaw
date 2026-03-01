@@ -42,6 +42,35 @@ process.on('uncaughtException', (err) => {
 // Create a minimal queue for scheduled tasks
 const queue = new GroupQueue();
 
+// Create shared scheduler dependencies
+const schedulerDeps = {
+  agents: async () => await getAllAgents(),
+  getSessions: async () => {
+    const sessions: Record<string, string> = {};
+    const dbSessions = await getAllSessions();
+    for (const [jid, data] of Object.entries(dbSessions)) {
+      sessions[jid] = data.sessionId;
+    }
+    return sessions;
+  },
+  runAgent: async (input: AgentInput) => {
+    // Will be set after agentRuntime is created
+    return await agentRuntime.run(input);
+  },
+  sendMessage: async (jid: string, text: string) => {
+    const formatted = formatOutbound(text);
+    if (!formatted) return;
+    try {
+      await sendMessageToJid(jid, formatted);
+    } catch (err) {
+      logger.error(
+        { jid, err, text: text.slice(0, 50) },
+        'Failed to send scheduled message',
+      );
+    }
+  },
+};
+
 // Create agent runtime that sends messages via Chat SDK
 logger.info('Initializing agent runtime with Chat SDK message handler');
 const agentRuntime = createAgentRuntime({
@@ -53,6 +82,7 @@ const agentRuntime = createAgentRuntime({
     }
   },
   getRegisteredAgents: async () => await getAllAgents(),
+  schedulerDeps,
 });
 
 /**
@@ -67,35 +97,8 @@ async function main(): Promise<void> {
 
   logger.info('Database initialized');
 
-  // Start scheduler loop for background tasks
-  startSchedulerLoop({
-    agents: async () => await getAllAgents(),
-    getSessions: async () => {
-      const sessions: Record<string, string> = {};
-      const dbSessions = await getAllSessions();
-      for (const [jid, data] of Object.entries(dbSessions)) {
-        sessions[jid] = data.sessionId;
-      }
-      return sessions;
-    },
-    runAgent: async (input: AgentInput) => {
-      // Run the agent and return result
-      return await agentRuntime.run(input);
-    },
-    sendMessage: async (jid, rawText) => {
-      const text = formatOutbound(rawText);
-      if (!text) return;
-
-      try {
-        await sendMessageToJid(jid, text);
-      } catch (err) {
-        logger.error(
-          { jid, err, text: text.slice(0, 50) },
-          'Failed to send scheduled message',
-        );
-      }
-    },
-  });
+  // Start scheduler loop for background tasks (uses shared schedulerDeps)
+  startSchedulerLoop(schedulerDeps);
 
   // Check for pending update completion
   const pendingUpdatePath = path.join(DATA_DIR, 'update-pending.json');
