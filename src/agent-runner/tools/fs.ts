@@ -53,12 +53,11 @@ export function createFsTools(ctx: WorkspaceContext) {
           return { entries };
         }
 
-        const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
-
         // Check if this is an image file
         if (isImageFile(resolved.resolvedPath)) {
           const mimeType = getMimeTypeFromExtension(resolved.resolvedPath);
           return {
+            base64: fs.readFileSync(resolved.resolvedPath, 'base64'),
             content: `[media attached: ${resolved.resolvedPath} (${mimeType})]`,
             totalLines: 1,
             offset: 1,
@@ -68,6 +67,8 @@ export function createFsTools(ctx: WorkspaceContext) {
           };
         }
 
+        const content = fs.readFileSync(resolved.resolvedPath, 'utf-8');
+
         const lines = content.split('\n');
         const offset = Math.max((input.offset || 1) - 1, 0);
         const limit = input.limit ?? lines.length;
@@ -76,6 +77,35 @@ export function createFsTools(ctx: WorkspaceContext) {
           content: slice.join('\n'),
           totalLines: lines.length,
           offset: offset + 1,
+        };
+      },
+      toModelOutput: ({ input, output, toolCallId }) => {
+        const { base64, ...content } = output;
+        if (!base64) {
+          return {
+            type: 'content',
+            value: [
+              {
+                type: 'text',
+                text: JSON.stringify(content),
+              },
+            ],
+          };
+        }
+
+        return {
+          type: 'content',
+          value: [
+            {
+              type: 'image-data',
+              data: base64!,
+              mediaType: content.mimeType ?? '',
+            },
+            {
+              type: 'text',
+              text: JSON.stringify(content),
+            },
+          ],
         };
       },
     }),

@@ -11,12 +11,20 @@ function truncateObjectValues(
   obj: unknown,
   maxLines = 500,
   maxBytes = 100 * 1024,
+  path: string[] = [],
 ): unknown {
   if (obj === null || obj === undefined) {
     return obj;
   }
 
   if (typeof obj === 'string') {
+    const currentKey = path[path.length - 1];
+
+    // Preserve binary payloads (for example image base64 data)
+    if (currentKey === 'base64') {
+      return obj;
+    }
+
     // Check if string is large enough to truncate
     const lines = obj.split('\n');
     const bytes = Buffer.byteLength(obj, 'utf-8');
@@ -45,13 +53,27 @@ function truncateObjectValues(
   }
 
   if (Array.isArray(obj)) {
-    return obj.map((item) => truncateObjectValues(item, maxLines, maxBytes));
+    return obj.map((item) =>
+      truncateObjectValues(item, maxLines, maxBytes, path),
+    );
   }
 
   if (typeof obj === 'object') {
+    // Preserve AI SDK image-data parts as-is
+    if (
+      'type' in obj &&
+      (obj as Record<string, unknown>).type === 'image-data' &&
+      typeof (obj as Record<string, unknown>).data === 'string'
+    ) {
+      return obj;
+    }
+
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      result[key] = truncateObjectValues(value, maxLines, maxBytes);
+      result[key] = truncateObjectValues(value, maxLines, maxBytes, [
+        ...path,
+        key,
+      ]);
     }
     return result;
   }
