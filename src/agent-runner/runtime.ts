@@ -438,7 +438,7 @@ async function runQuery(
   const streamStartTime = Date.now();
   let streamError: Error | null = null;
 
-  logger.debug({ msgs: messages }, 'messages being sent to the stream');
+  logger.debug({ msgs: messages.length }, 'messages being sent to the stream');
 
   try {
     // Wrap model with reasoning extraction middleware
@@ -505,7 +505,6 @@ async function runQuery(
             stepCount: event.stepNumber,
             usageTokens,
             finishReason: event.finishReason,
-            responseMessages,
             lastAssistantKeys: lastAssistant
               ? Object.keys(lastAssistant as Record<string, unknown>)
               : [],
