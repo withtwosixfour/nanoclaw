@@ -623,7 +623,7 @@ async function runQuery(
       sendMessage: deps.sendMessage,
       schedulerDeps: deps.schedulerDeps,
     },
-  }) as Record<string, any>;
+  });
 
   let responseMessages: ModelMessage[] = [];
   let usageTokens = 0;

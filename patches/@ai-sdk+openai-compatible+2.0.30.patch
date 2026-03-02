@@ -1,0 +1,320 @@
+diff --git a/node_modules/@ai-sdk/openai-compatible/dist/index.js b/node_modules/@ai-sdk/openai-compatible/dist/index.js
+index f5902dd..5eac968 100644
+--- a/node_modules/@ai-sdk/openai-compatible/dist/index.js
++++ b/node_modules/@ai-sdk/openai-compatible/dist/index.js
+@@ -250,6 +250,7 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+         break;
+       }
+       case "tool": {
++        const mediaUserContentParts = [];
+         for (const toolResponse of content) {
+           if (toolResponse.type === "tool-approval-response") {
+             continue;
+@@ -264,7 +265,47 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             case "execution-denied":
+               contentValue = (_c = output.reason) != null ? _c : "Tool execution denied.";
+               break;
+-            case "content":
++            case "content": {
++              const textParts = [];
++              for (const item of output.value) {
++                switch (item.type) {
++                  case "text":
++                    textParts.push(item.text);
++                    break;
++                  case "image-data":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: {
++                        url: `data:${item.mediaType};base64,${item.data}`
++                      }
++                    });
++                    break;
++                  case "image-url":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: { url: item.url }
++                    });
++                    break;
++                  case "file-data":
++                    if (item.mediaType.startsWith("image/")) {
++                      mediaUserContentParts.push({
++                        type: "image_url",
++                        image_url: {
++                          url: `data:${item.mediaType};base64,${item.data}`
++                        }
++                      });
++                    } else {
++                      textParts.push(JSON.stringify(item));
++                    }
++                    break;
++                  default:
++                    textParts.push(JSON.stringify(item));
++                    break;
++                }
++              }
++              contentValue = textParts.length > 0 ? textParts.join("\n") : "See attached media.";
++              break;
++            }
+             case "json":
+             case "error-json":
+               contentValue = JSON.stringify(output.value);
+@@ -278,6 +319,18 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             ...toolResponseMetadata
+           });
+         }
++        if (mediaUserContentParts.length > 0) {
++          messages.push({
++            role: "user",
++            content: [
++              {
++                type: "text",
++                text: "[Image from tool result]"
++              },
++              ...mediaUserContentParts
++            ]
++          });
++        }
+         break;
+       }
+       default: {
+diff --git a/node_modules/@ai-sdk/openai-compatible/dist/index.mjs b/node_modules/@ai-sdk/openai-compatible/dist/index.mjs
+index 75d3b9d..eb49d23 100644
+--- a/node_modules/@ai-sdk/openai-compatible/dist/index.mjs
++++ b/node_modules/@ai-sdk/openai-compatible/dist/index.mjs
+@@ -232,6 +232,7 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+         break;
+       }
+       case "tool": {
++        const mediaUserContentParts = [];
+         for (const toolResponse of content) {
+           if (toolResponse.type === "tool-approval-response") {
+             continue;
+@@ -246,7 +247,47 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             case "execution-denied":
+               contentValue = (_c = output.reason) != null ? _c : "Tool execution denied.";
+               break;
+-            case "content":
++            case "content": {
++              const textParts = [];
++              for (const item of output.value) {
++                switch (item.type) {
++                  case "text":
++                    textParts.push(item.text);
++                    break;
++                  case "image-data":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: {
++                        url: `data:${item.mediaType};base64,${item.data}`
++                      }
++                    });
++                    break;
++                  case "image-url":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: { url: item.url }
++                    });
++                    break;
++                  case "file-data":
++                    if (item.mediaType.startsWith("image/")) {
++                      mediaUserContentParts.push({
++                        type: "image_url",
++                        image_url: {
++                          url: `data:${item.mediaType};base64,${item.data}`
++                        }
++                      });
++                    } else {
++                      textParts.push(JSON.stringify(item));
++                    }
++                    break;
++                  default:
++                    textParts.push(JSON.stringify(item));
++                    break;
++                }
++              }
++              contentValue = textParts.length > 0 ? textParts.join("\n") : "See attached media.";
++              break;
++            }
+             case "json":
+             case "error-json":
+               contentValue = JSON.stringify(output.value);
+@@ -260,6 +301,18 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             ...toolResponseMetadata
+           });
+         }
++        if (mediaUserContentParts.length > 0) {
++          messages.push({
++            role: "user",
++            content: [
++              {
++                type: "text",
++                text: "[Image from tool result]"
++              },
++              ...mediaUserContentParts
++            ]
++          });
++        }
+         break;
+       }
+       default: {
+diff --git a/node_modules/@ai-sdk/openai-compatible/dist/internal/index.js b/node_modules/@ai-sdk/openai-compatible/dist/internal/index.js
+index cea0b5a..427fa20 100644
+--- a/node_modules/@ai-sdk/openai-compatible/dist/internal/index.js
++++ b/node_modules/@ai-sdk/openai-compatible/dist/internal/index.js
+@@ -187,6 +187,7 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+         break;
+       }
+       case "tool": {
++        const mediaUserContentParts = [];
+         for (const toolResponse of content) {
+           if (toolResponse.type === "tool-approval-response") {
+             continue;
+@@ -201,7 +202,47 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             case "execution-denied":
+               contentValue = (_c = output.reason) != null ? _c : "Tool execution denied.";
+               break;
+-            case "content":
++            case "content": {
++              const textParts = [];
++              for (const item of output.value) {
++                switch (item.type) {
++                  case "text":
++                    textParts.push(item.text);
++                    break;
++                  case "image-data":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: {
++                        url: `data:${item.mediaType};base64,${item.data}`
++                      }
++                    });
++                    break;
++                  case "image-url":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: { url: item.url }
++                    });
++                    break;
++                  case "file-data":
++                    if (item.mediaType.startsWith("image/")) {
++                      mediaUserContentParts.push({
++                        type: "image_url",
++                        image_url: {
++                          url: `data:${item.mediaType};base64,${item.data}`
++                        }
++                      });
++                    } else {
++                      textParts.push(JSON.stringify(item));
++                    }
++                    break;
++                  default:
++                    textParts.push(JSON.stringify(item));
++                    break;
++                }
++              }
++              contentValue = textParts.length > 0 ? textParts.join("\n") : "See attached media.";
++              break;
++            }
+             case "json":
+             case "error-json":
+               contentValue = JSON.stringify(output.value);
+@@ -215,6 +256,18 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             ...toolResponseMetadata
+           });
+         }
++        if (mediaUserContentParts.length > 0) {
++          messages.push({
++            role: "user",
++            content: [
++              {
++                type: "text",
++                text: "[Image from tool result]"
++              },
++              ...mediaUserContentParts
++            ]
++          });
++        }
+         break;
+       }
+       default: {
+diff --git a/node_modules/@ai-sdk/openai-compatible/dist/internal/index.mjs b/node_modules/@ai-sdk/openai-compatible/dist/internal/index.mjs
+index fdff782..ede9c46 100644
+--- a/node_modules/@ai-sdk/openai-compatible/dist/internal/index.mjs
++++ b/node_modules/@ai-sdk/openai-compatible/dist/internal/index.mjs
+@@ -159,6 +159,7 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+         break;
+       }
+       case "tool": {
++        const mediaUserContentParts = [];
+         for (const toolResponse of content) {
+           if (toolResponse.type === "tool-approval-response") {
+             continue;
+@@ -173,7 +174,47 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             case "execution-denied":
+               contentValue = (_c = output.reason) != null ? _c : "Tool execution denied.";
+               break;
+-            case "content":
++            case "content": {
++              const textParts = [];
++              for (const item of output.value) {
++                switch (item.type) {
++                  case "text":
++                    textParts.push(item.text);
++                    break;
++                  case "image-data":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: {
++                        url: `data:${item.mediaType};base64,${item.data}`
++                      }
++                    });
++                    break;
++                  case "image-url":
++                    mediaUserContentParts.push({
++                      type: "image_url",
++                      image_url: { url: item.url }
++                    });
++                    break;
++                  case "file-data":
++                    if (item.mediaType.startsWith("image/")) {
++                      mediaUserContentParts.push({
++                        type: "image_url",
++                        image_url: {
++                          url: `data:${item.mediaType};base64,${item.data}`
++                        }
++                      });
++                    } else {
++                      textParts.push(JSON.stringify(item));
++                    }
++                    break;
++                  default:
++                    textParts.push(JSON.stringify(item));
++                    break;
++                }
++              }
++              contentValue = textParts.length > 0 ? textParts.join("\n") : "See attached media.";
++              break;
++            }
+             case "json":
+             case "error-json":
+               contentValue = JSON.stringify(output.value);
+@@ -187,6 +228,18 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+             ...toolResponseMetadata
+           });
+         }
++        if (mediaUserContentParts.length > 0) {
++          messages.push({
++            role: "user",
++            content: [
++              {
++                type: "text",
++                text: "[Image from tool result]"
++              },
++              ...mediaUserContentParts
++            ]
++          });
++        }
+         break;
+       }
+       default: {

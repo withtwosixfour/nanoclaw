@@ -80,7 +80,7 @@ export function createFsTools(ctx: WorkspaceContext) {
           offset: offset + 1,
         };
       },
-      toModelOutput: ({ input, output, toolCallId }) => {
+      toModelOutput: ({ input, output }) => {
         const { base64, ...content } = output;
         if (!base64) {
           return {
