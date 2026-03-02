@@ -25,7 +25,8 @@ function resolvePath(
 export function createFsTools(ctx: WorkspaceContext) {
   return {
     Read: tool({
-      description: 'Read a file or directory from disk.',
+      description:
+        'Read a file or directory from disk. Use to read images and view them',
       inputSchema: z.object({
         path: z.string().describe('File or directory path'),
         offset: z.number().int().optional().describe('Line offset (1-indexed)'),
