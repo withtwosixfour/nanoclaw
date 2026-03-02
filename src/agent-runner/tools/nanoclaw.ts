@@ -14,8 +14,13 @@ import {
   setAgent,
 } from '../../db.js';
 import { Agent } from '../../types.js';
+import { logger } from '../../logger.js';
 import { resolveAgentId, isNoReply } from '../../router.js';
 import { getAvailableModels, isModelConfigured } from '../model-config.js';
+import {
+  runTaskNow,
+  type SchedulerDependencies,
+} from '../../task-scheduler.js';
 
 export interface NanoClawContext {
   chatJid: string;
@@ -25,6 +30,7 @@ export interface NanoClawContext {
 
 export interface NanoClawDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
+  schedulerDeps: SchedulerDependencies;
 }
 
 async function createOrUpdateAgent(
@@ -345,6 +351,38 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         return {
           ok: true,
           message: `Task ${input.task_id} cancellation requested.`,
+        };
+      },
+    }),
+    run_task: tool({
+      description:
+        'Run a scheduled task immediately without affecting its schedule. Executes the task now using the same handler as scheduled runs.',
+      inputSchema: z.object({
+        task_id: z.string().describe('Task ID to run now'),
+      }),
+      execute: async (input: { task_id: string }) => {
+        const task = await getTaskById(input.task_id);
+        if (!task) {
+          return { error: 'Task not found.' };
+        }
+        if (!ctx.isMain && task.agent_id !== ctx.agentId) {
+          return { error: 'Unauthorized task run attempt.' };
+        }
+        if (task.status !== 'active') {
+          return {
+            error: `Cannot run task: status is ${task.status} (must be active).`,
+          };
+        }
+        // Run the task immediately without updating the schedule
+        runTaskNow(task, deps.schedulerDeps).catch((err) => {
+          logger.error(
+            { taskId: task.id, err },
+            'Manual task execution failed',
+          );
+        });
+        return {
+          ok: true,
+          message: `Task ${input.task_id} is now running.`,
         };
       },
     }),
