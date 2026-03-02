@@ -1189,7 +1189,11 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     let prompt = input.prompt;
     if (input.isScheduledTask) {
       prompt =
-        '[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n' +
+        '[SCHEDULED TASK - The following instruction is running automatically and is not a direct user/group message.]\n\n' +
+        'You are executing a scheduled task. Return ONLY the final user-facing message content that should be posted.\n' +
+        'Do NOT include task metadata, confirmations, or status text (for example: task IDs, next run times, or "task executed").\n' +
+        'Do NOT call the send_message tool for the main result of a scheduled task; your returned text will be sent automatically.\n' +
+        'Only include extra explanatory text if the task prompt explicitly asks for it.\n\n' +
         prompt;
     }
 

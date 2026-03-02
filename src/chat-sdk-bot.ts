@@ -10,7 +10,7 @@ import {
 } from './config.js';
 import { logger } from './logger.js';
 import type { Logger as ChatLogger } from 'chat';
-import { resolveAgentId } from './router.js';
+import { resolveAgentId, formatOutbound } from './router.js';
 import {
   storeMessage,
   storeAttachment,
@@ -581,12 +581,16 @@ async function runAgent(
 // Create agent runtime
 const agentRuntime = createAgentRuntime({
   sendMessage: async (jid, text) => {
-    // This is called by tools within the agent - we'll need to look up the thread
-    // For now, this is a placeholder - in practice, tools shouldn't send messages directly
-    logger.warn(
-      { jid, text: text.slice(0, 50) },
-      'Tool tried to send message - not implemented in Chat SDK mode',
-    );
+    const formatted = formatOutbound(text);
+    if (!formatted) return;
+    try {
+      await sendMessageToJid(jid, formatted);
+    } catch (err) {
+      logger.error(
+        { jid, err, text: formatted.slice(0, 50) },
+        'Failed to send message from tool',
+      );
+    }
   },
   getRegisteredAgents: async () => ({}),
   schedulerDeps: {
@@ -603,10 +607,16 @@ const agentRuntime = createAgentRuntime({
       return await agentRuntime.run(input);
     },
     sendMessage: async (jid: string, text: string) => {
-      logger.warn(
-        { jid, text: text.slice(0, 50) },
-        'Scheduler tried to send message - not implemented in Chat SDK mode',
-      );
+      const formatted = formatOutbound(text);
+      if (!formatted) return;
+      try {
+        await sendMessageToJid(jid, formatted);
+      } catch (err) {
+        logger.error(
+          { jid, err, text: formatted.slice(0, 50) },
+          'Failed to send scheduled message',
+        );
+      }
     },
   },
 });
