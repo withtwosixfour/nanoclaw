@@ -303,7 +303,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         if (tasks.length === 0) {
           return { message: 'No scheduled tasks found.' };
         }
-        return { message: `Scheduled tasks:\n${formatTaskList(tasks)}` };
+        return { message: `Scheduled tasks:\n${tasks}` };
       },
     }),
     pause_task: tool({
