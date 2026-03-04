@@ -92,6 +92,23 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+// Handle uncaught exceptions and unhandled rejections to ensure events are flushed
+process.on('uncaughtException', (err) => {
+  logger.error({ error: err.message, stack: err.stack }, 'Uncaught exception');
+  if (posthogClient) {
+    posthogClient.shutdown();
+  }
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason }, 'Unhandled rejection');
+  if (posthogClient) {
+    posthogClient.shutdown();
+  }
+  process.exit(1);
+});
+
 export interface AgentInput {
   prompt: string;
   sessionId?: string;
