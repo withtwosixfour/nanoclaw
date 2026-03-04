@@ -61,3 +61,10 @@ export const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '')
   .split(',')
   .map((id) => id.trim())
   .filter((id) => id.length > 0);
+
+// PostHog analytics configuration
+export const POSTHOG_PROJECT_ID = process.env.POSTHOG_PROJECT_ID || '';
+export const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY || '';
+export const POSTHOG_HOST =
+  process.env.POSTHOG_HOST || 'https://us.i.posthog.com';
+export const POSTHOG_ENABLED = !!POSTHOG_PROJECT_ID && !!POSTHOG_API_KEY;
