@@ -1,6 +1,7 @@
 import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
+import { POSTHOG_ENABLED, POSTHOG_API_KEY, POSTHOG_HOST } from './config';
 
 // Ensure logs directory exists
 const logsDir = 'logs';
@@ -8,39 +9,83 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true });
 }
 
+// Detect dev mode - dev script sets LOG_LEVEL=debug
+const isDevMode =
+  process.env.LOG_LEVEL === 'debug' || process.env.NODE_ENV === 'development';
+
 // Disable colors in logs when running non-interactively or when NO_COLOR is set
 const useColors = process.stdout.isTTY && !process.env.NO_COLOR;
 
 const level = process.env.LOG_LEVEL || 'info';
 
+// Build transport targets based on environment
+const transportTargets: pino.TransportTargetOptions[] = [];
+
+if (isDevMode) {
+  // In dev mode: console pretty print + file logging
+  transportTargets.push(
+    {
+      target: 'pino-pretty',
+      level,
+      options: {
+        colorize: useColors,
+        translateTime: 'yyyy-mm-dd HH:MM:ss.l',
+        ignore: 'pid,hostname',
+        messageFormat: '{msg}',
+        singleLine: true,
+      },
+    },
+    {
+      target: 'pino/file',
+      level,
+      options: {
+        destination: path.join(logsDir, 'nanoclaw.log'),
+        mkdir: true,
+      },
+    },
+  );
+} else if (POSTHOG_ENABLED) {
+  // In production with PostHog: send logs to PostHog via OpenTelemetry
+  // Set environment variables required by pino-opentelemetry-transport
+  process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${POSTHOG_HOST}/i/v1/logs`;
+  process.env.OTEL_EXPORTER_OTLP_HEADERS = `Authorization=Bearer ${POSTHOG_API_KEY}`;
+  process.env.OTEL_RESOURCE_ATTRIBUTES = `service.name=nanoclaw,service.version=${process.env.npm_package_version || '1.0.0'}`;
+
+  transportTargets.push({
+    target: 'pino-opentelemetry-transport',
+    level,
+    options: {
+      loggerName: 'nanoclaw',
+      serviceVersion: process.env.npm_package_version || '1.0.0',
+      resourceAttributes: {
+        'service.name': 'nanoclaw',
+        'service.version': process.env.npm_package_version || '1.0.0',
+      },
+    },
+  });
+} else {
+  // In production without PostHog: file logging only
+  transportTargets.push({
+    target: 'pino/file',
+    level,
+    options: {
+      destination: path.join(logsDir, 'nanoclaw.log'),
+      mkdir: true,
+    },
+  });
+}
+
 export const logger = pino({
   level,
   transport: {
-    targets: [
-      {
-        target: 'pino-pretty',
-        level,
-        options: {
-          colorize: useColors,
-          translateTime: 'yyyy-mm-dd HH:MM:ss.l',
-          ignore: 'pid,hostname',
-          messageFormat: '{msg}',
-          singleLine: true,
-        },
-      },
-      {
-        target: 'pino/file',
-        level,
-        options: {
-          destination: path.join(logsDir, 'nanoclaw.log'),
-          mkdir: true,
-        },
-      },
-    ],
+    targets: transportTargets,
   },
 });
 
-logger.info({ level }, 'logger initialized');
+logger.info(
+  { level, isDevMode, posthogEnabled: POSTHOG_ENABLED },
+  'logger initialized',
+);
 
 // Route uncaught errors through pino so they get timestamps
 process.on('uncaughtException', (err) => {
