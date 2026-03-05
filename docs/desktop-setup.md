@@ -42,7 +42,7 @@ systemctl status persistent-desktop.service xfce-desktop.service x11vnc.service
 User services:
 
 ```bash
-sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status chrome-cdp.service nanoclaw.service
+sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/$(id -u ubuntu) systemctl --user status chrome-cdp.service nanoclaw.service
 ```
 
 Check Chrome CDP:

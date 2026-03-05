@@ -49,6 +49,14 @@ EOF
 ${SUDO} apt-get update
 ${SUDO} apt-get install -y google-chrome-stable
 
+# Ensure ubuntu user is in docker group for nanoclaw.service
+if getent group docker >/dev/null 2>&1; then
+  if ! id -nG "${USER_NAME}" | grep -qw docker; then
+    ${SUDO} usermod -aG docker "${USER_NAME}"
+    echo "Added ${USER_NAME} to docker group. Note: A logout/login may be needed for this to take effect." >&2
+  fi
+fi
+
 ${SUDO} install -m 0644 scripts/systemd/persistent-desktop.service "${SYSTEMD_SYSTEM_DIR}/persistent-desktop.service"
 
 # Install xfce-desktop.service with dynamic UID substitution
@@ -106,11 +114,20 @@ ${SUDO} install -d -m 0700 -o "${USER_NAME}" -g "${USER_NAME}" "${XRUNTIME_DIR}"
 ${SUDO_U} mkdir -p "${USER_HOME}/.vnc"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
+  ${SUDO_U} mkdir -p "$(dirname "${ENV_FILE}")"
   ${SUDO_U} touch "${ENV_FILE}"
   echo "Warning: ${ENV_FILE} created empty. Add your secrets before starting nanoclaw." >&2
 fi
 
 ${SUDO} loginctl enable-linger "${USER_NAME}"
+
+# Wait for user manager to start after enabling linger
+for i in {1..30}; do
+  if ${SUDO_U} XDG_RUNTIME_DIR="${XRUNTIME_DIR}" systemctl --user daemon-reload 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
 
 ${SUDO} systemctl daemon-reload
 ${SUDO} systemctl enable --now persistent-desktop.service xfce-desktop.service x11vnc.service
