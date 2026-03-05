@@ -1,6 +1,7 @@
 [Unit]
 Description=Chrome with Remote Debugging (CDP)
-After=xfce-desktop.service
+# Note: User services cannot reference system services in After=
+# Chrome will crash-loop until display :1 is ready (Restart=always handles this)
 
 [Service]
 Type=simple
