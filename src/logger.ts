@@ -109,7 +109,7 @@ logger.info(
   {
     level,
     isDevMode,
-    posthogEnabled: process.env.POSTHOG_API_KEY != undefined,
+    posthogEnabled: !!process.env.POSTHOG_API_KEY,
     instanceId: instanceInfo.id,
     instanceName: instanceInfo.name,
   },
