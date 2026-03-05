@@ -71,9 +71,7 @@ Type=simple
 User=ubuntu
 Environment="DISPLAY=:1"
 Environment="XAUTHORITY=/home/ubuntu/.Xauthority"
-Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=${XRUNTIME_DIR}/bus"
-ExecStartPre=/bin/bash -c "dbus-daemon --session --address=unix:path=${XRUNTIME_DIR}/bus --fork 2>/dev/null || true"
-ExecStart=/usr/bin/startxfce4
+ExecStart=/usr/bin/dbus-run-session -- /usr/bin/startxfce4
 Restart=always
 RestartSec=5
 
