@@ -71,9 +71,9 @@ function getPostHogClient(): PostHog | null {
   return posthogClient;
 }
 
-// Graceful shutdown for PostHog - only handle SIGINT/SIGTERM
-// Note: process.on('exit') cannot run async operations
-async function shutdownPostHog(): Promise<void> {
+// Graceful shutdown for PostHog - exported for use in main shutdown sequence
+// Note: This should be called as part of the main shutdown sequence, not in signal handlers
+export async function shutdownPostHog(): Promise<void> {
   if (posthogClient) {
     try {
       await posthogClient.shutdown();
@@ -84,18 +84,9 @@ async function shutdownPostHog(): Promise<void> {
   }
 }
 
-process.on('SIGINT', async () => {
-  await shutdownPostHog();
-  process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  await shutdownPostHog();
-  process.exit(0);
-});
-
-// Note: uncaughtException and unhandledRejection are handled in src/index.ts and src/logger.ts
-// We don't register them here to avoid duplicate handlers
+// Note: Signal handlers (SIGINT/SIGTERM) and uncaughtException/unhandledRejection
+// are handled in src/index.ts to avoid duplicate handlers and race conditions.
+// PostHog shutdown is called from the main shutdown sequence in index.ts.
 
 export interface AgentInput {
   prompt: string;

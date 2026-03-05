@@ -63,8 +63,10 @@ export const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '')
   .filter((id) => id.length > 0);
 
 // PostHog analytics configuration
+// Note: POSTHOG_PROJECT_ID is optional and stored for reference only.
+// The PostHog Node SDK only requires POSTHOG_API_KEY.
 export const POSTHOG_PROJECT_ID = process.env.POSTHOG_PROJECT_ID || '';
 export const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY || '';
 export const POSTHOG_HOST =
   process.env.POSTHOG_HOST || 'https://us.i.posthog.com';
-export const POSTHOG_ENABLED = !!POSTHOG_PROJECT_ID && !!POSTHOG_API_KEY;
+export const POSTHOG_ENABLED = !!POSTHOG_API_KEY;
