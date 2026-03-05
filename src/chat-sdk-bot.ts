@@ -2,12 +2,7 @@ import { Chat, type Thread, type Message, type SlashCommandEvent } from 'chat';
 import { createDiscordAdapter } from '@chat-adapter/discord';
 import { createSlackAdapter } from '@chat-adapter/slack';
 import { createSQLiteState } from './chat-sdk-state-sqlite.js';
-import {
-  ASSISTANT_NAME,
-  DISCORD_BOT_TOKEN,
-  SLACK_BOT_TOKEN,
-  DATA_DIR,
-} from './config.js';
+import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { Logger as ChatLogger } from 'chat';
 import { resolveAgentId, formatOutbound } from './router.js';
@@ -717,14 +712,14 @@ export async function createChatSdkBot(): Promise<Chat> {
   > = {};
 
   // Configure Discord adapter if token is provided
-  if (DISCORD_BOT_TOKEN) {
+  if (process.env.DISCORD_BOT_TOKEN) {
     adapters.discord = createDiscordAdapter({
       logger: new PinoLoggerAdapter(logger),
     });
   }
 
   // Configure Slack adapter if token is provided
-  if (SLACK_BOT_TOKEN) {
+  if (process.env.SLACK_BOT_TOKEN) {
     adapters.slack = createSlackAdapter({
       logger: new PinoLoggerAdapter(logger),
     });
@@ -1005,7 +1000,7 @@ export async function createChatSdkBot(): Promise<Chat> {
 
   // Start Discord gateway listener if Discord is configured
   // Discord uses WebSocket gateway; Slack uses HTTP webhooks (handled by Chat SDK)
-  if (DISCORD_BOT_TOKEN) {
+  if (process.env.DISCORD_BOT_TOKEN) {
     const discordAdapter = bot.getAdapter('discord');
     // Type guard: Discord adapter has startGatewayListener, Slack does not
     if ('startGatewayListener' in discordAdapter) {
@@ -1021,7 +1016,7 @@ export async function createChatSdkBot(): Promise<Chat> {
 
   // Slack is initialized via webhooks (no gateway listener needed)
   // The Chat SDK handles webhook routing automatically
-  if (SLACK_BOT_TOKEN) {
+  if (process.env.SLACK_BOT_TOKEN) {
     logger.info('Slack adapter initialized (webhook mode)');
   }
 

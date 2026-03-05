@@ -15,13 +15,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { withTracing } from '@posthog/ai';
 import { PostHog } from 'posthog-node';
 
-import {
-  AGENTS_DIR,
-  SESSIONS_DIR,
-  POSTHOG_ENABLED,
-  POSTHOG_API_KEY,
-  POSTHOG_HOST,
-} from '../config';
+import { AGENTS_DIR, SESSIONS_DIR } from '../config';
 import { logger } from '../logger';
 import { Agent } from '../types';
 import { createToolRegistry } from './tool-registry';
@@ -57,13 +51,13 @@ const activeCompactions = new Set<string>();
 let posthogClient: PostHog | null = null;
 
 function getPostHogClient(): PostHog | null {
-  if (!POSTHOG_ENABLED) {
+  if (!process.env.POSTHOG_API_KEY) {
     return null;
   }
 
   if (!posthogClient) {
-    posthogClient = new PostHog(POSTHOG_API_KEY, {
-      host: POSTHOG_HOST,
+    posthogClient = new PostHog(process.env.POSTHOG_API_KEY, {
+      host: process.env.POSTHOG_HOST ?? '',
     });
     logger.debug('PostHog client initialized for AI tracing');
   }

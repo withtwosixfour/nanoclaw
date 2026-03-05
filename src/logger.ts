@@ -1,17 +1,16 @@
 import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
-import { POSTHOG_ENABLED, POSTHOG_API_KEY, POSTHOG_HOST } from './config';
 
 // Set OTEL env vars for PostHog BEFORE any imports that might read them
 // This ensures pino-opentelemetry-transport gets the right config in its worker thread
 // We only set them if not already configured to respect user overrides
-if (POSTHOG_ENABLED) {
+if (process.env.POSTHOG_API_KEY) {
   if (!process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) {
-    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${POSTHOG_HOST}/i/v1/logs`;
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${process.env.POSTHOG_HOST}/i/v1/logs`;
   }
   if (!process.env.OTEL_EXPORTER_OTLP_HEADERS) {
-    process.env.OTEL_EXPORTER_OTLP_HEADERS = `Authorization=Bearer ${POSTHOG_API_KEY}`;
+    process.env.OTEL_EXPORTER_OTLP_HEADERS = `Authorization=Bearer ${process.env.POSTHOG_API_KEY}`;
   }
   if (!process.env.OTEL_RESOURCE_ATTRIBUTES) {
     process.env.OTEL_RESOURCE_ATTRIBUTES = `service.name=nanoclaw,service.version=${process.env.npm_package_version || '1.0.0'}`;
@@ -59,7 +58,7 @@ if (isDevMode) {
       },
     },
   );
-} else if (POSTHOG_ENABLED) {
+} else if (process.env.POSTHOG_API_KEY) {
   // In production with PostHog: send logs to PostHog via OpenTelemetry
   transportTargets.push({
     target: 'pino-opentelemetry-transport',
@@ -93,7 +92,11 @@ export const logger = pino({
 });
 
 logger.info(
-  { level, isDevMode, posthogEnabled: POSTHOG_ENABLED },
+  {
+    level,
+    isDevMode,
+    posthogEnabled: process.env.POSTHOG_API_KEY != undefined,
+  },
   'logger initialized',
 );
 
