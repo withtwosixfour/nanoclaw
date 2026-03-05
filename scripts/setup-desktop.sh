@@ -25,6 +25,12 @@ fi
 # SUDO_U for user-switching (always required, even when root)
 SUDO_U="sudo -u ${USER_NAME}"
 
+# Early prerequisite check: VNC password must exist before we modify the system
+if [[ ! -f "${VNC_PASSWD}" ]]; then
+  echo "Error: ${VNC_PASSWD} missing. Run 'vncpasswd' as ${USER_NAME} to set a VNC password before running this script." >&2
+  exit 1
+fi
+
 ${SUDO} apt-get update
 ${SUDO} apt-get install -y \
   ca-certificates \
@@ -79,12 +85,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Install x11vnc.service with dynamic VNC passwd check
-if [[ ! -f "${VNC_PASSWD}" ]]; then
-  echo "Error: ${VNC_PASSWD} missing. Run 'vncpasswd' as ${USER_NAME} to set a VNC password before running this script." >&2
-  exit 1
-fi
-
+# Install x11vnc.service
 ${SUDO} tee "${SYSTEMD_SYSTEM_DIR}/x11vnc.service" > /dev/null << EOF
 [Unit]
 Description=X11VNC Server for Virtual Display
