@@ -53,14 +53,10 @@ export function createBashTool(ctx: WorkspaceContext) {
         return { stdout: '', stderr: resolved.error, exitCode: 1 };
       }
 
-      const env = buildSanitizedEnv();
-      const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
-      const finalCommand = unsetPrefix + command;
-
       try {
-        const { stdout, stderr } = await execAsync(finalCommand, {
+        const { stdout, stderr } = await execAsync(command, {
           cwd: resolved.resolvedPath,
-          env,
+          env: process.env,
           timeout: timeout ?? 120000,
           maxBuffer: 10 * 1024 * 1024,
           shell: '/bin/bash',
