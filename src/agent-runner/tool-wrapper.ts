@@ -2,6 +2,7 @@ import { tool, type Tool } from 'ai';
 import { truncateOutput } from '../context/truncate.js';
 import { logger } from '../logger.js';
 import { createBaseTools } from './tool-registry.js';
+import type { ToolSet } from 'ai';
 
 /**
  * Recursively truncate large string values in an object.
@@ -198,16 +199,16 @@ export function wrapToolWithTruncation(
  */
 export function wrapToolRegistryWithTruncation(
   tools: ReturnType<typeof createBaseTools>,
-) {
-  const wrapped: Record<string, unknown> = {};
+): ToolSet {
+  const wrapped: Record<string, Tool<unknown, unknown>> = {};
 
   for (const [key, tool] of Object.entries(tools)) {
     if (isTool(tool)) {
       wrapped[key] = wrapToolWithTruncation(tool, key);
     } else {
-      wrapped[key] = tool;
+      wrapped[key] = tool as Tool<unknown, unknown>;
     }
   }
 
-  return wrapped;
+  return wrapped as ToolSet;
 }
