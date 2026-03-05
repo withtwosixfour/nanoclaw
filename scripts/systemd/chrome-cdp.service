@@ -1,6 +1,6 @@
 [Unit]
 Description=Chrome with Remote Debugging (CDP)
-After=graphical-session.target
+After=xfce-desktop.service
 
 [Service]
 Type=simple
@@ -10,10 +10,11 @@ ExecStart=/usr/bin/google-chrome \
     --no-first-run \
     --no-default-browser-check \
     --disable-default-apps \
+    --disable-gpu \
     --window-size=1280,720 \
     --user-data-dir=%h/.chrome-cdp-profile \
     about:blank
-ExecStop=/bin/kill -TERM $MAINPID
+ExecStop=/bin/kill -TERM -$MAINPID
 Restart=always
 RestartSec=5
 

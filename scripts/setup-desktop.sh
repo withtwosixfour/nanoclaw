@@ -110,7 +110,6 @@ ${SUDO_U} mkdir -p "${SYSTEMD_USER_DIR}"
 ${SUDO_U} install -m 0644 scripts/systemd/chrome-cdp.service "${SYSTEMD_USER_DIR}/chrome-cdp.service"
 ${SUDO_U} install -m 0644 scripts/systemd/nanoclaw.service "${SYSTEMD_USER_DIR}/nanoclaw.service"
 
-${SUDO} install -d -m 0700 -o "${USER_NAME}" -g "${USER_NAME}" "${XRUNTIME_DIR}"
 ${SUDO_U} mkdir -p "${USER_HOME}/.vnc"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -122,12 +121,19 @@ fi
 ${SUDO} loginctl enable-linger "${USER_NAME}"
 
 # Wait for user manager to start after enabling linger
+USER_MANAGER_READY=false
 for i in {1..30}; do
   if ${SUDO_U} XDG_RUNTIME_DIR="${XRUNTIME_DIR}" systemctl --user daemon-reload 2>/dev/null; then
+    USER_MANAGER_READY=true
     break
   fi
   sleep 0.5
 done
+
+if [[ "${USER_MANAGER_READY}" != "true" ]]; then
+  echo "Error: User manager for ${USER_NAME} failed to start after enabling linger. Check system logs." >&2
+  exit 1
+fi
 
 ${SUDO} systemctl daemon-reload
 ${SUDO} systemctl enable --now persistent-desktop.service xfce-desktop.service x11vnc.service
