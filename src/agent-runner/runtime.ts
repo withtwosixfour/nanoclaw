@@ -231,11 +231,10 @@ function buildSystemPrompt(agentId: string, isMain: boolean): string {
   return parts.filter(Boolean).join('\n\n');
 }
 
-function createModel({
-  provider: configProvider,
-  modelName,
-  isOpenAIResponseFormat,
-}: ModelConfig) {
+function createModel(
+  { provider: configProvider, modelName, isOpenAIResponseFormat }: ModelConfig,
+  type: 'agent' | 'compaction',
+) {
   const hasApiKey =
     (process.env.OPENCODE_ZEN_API_KEY ?? process.env.ANTHROPIC_API_KEY) !=
     undefined;
@@ -317,6 +316,7 @@ function createModel({
     return withTracing(baseModel, phClient, {
       posthogDistinctId: getInstanceId(),
       posthogProperties: {
+        type,
         provider: configProvider,
         model: modelName,
       },
