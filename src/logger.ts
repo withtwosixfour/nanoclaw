@@ -30,9 +30,11 @@ if (!fs.existsSync(logsDir)) {
 const isDevMode =
   process.env.LOG_LEVEL === 'debug' || process.env.NODE_ENV === 'development';
 
-if (isDevMode && POSTHOG_ENABLED) {
+if (isDevMode) {
   // warn will appear in the file/console transport that IS active
-  console.warn('[logger] LOG_LEVEL=debug: PostHog transport is disabled in dev mode');
+  console.warn(
+    '[logger] LOG_LEVEL=debug: PostHog transport is disabled in dev mode',
+  );
 }
 
 // Disable colors in logs when running non-interactively or when NO_COLOR is set
