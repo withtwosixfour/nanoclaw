@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { tool } from 'ai';
 
 import { resolveWorkspacePath, WorkspaceContext } from '../workspace-paths.js';
+import { evaluateBashCommandPolicy, loadBashPolicy } from './bash-policy.js';
 
 const execAsync = promisify(exec);
 
@@ -39,6 +40,22 @@ export function createBashTool(ctx: WorkspaceContext) {
       timeout?: number;
     }) => {
       const { command, workdir, timeout } = input;
+
+      const policyResult = loadBashPolicy(ctx.agentDir);
+      if (!policyResult.ok) {
+        return { stdout: '', stderr: policyResult.error, exitCode: 1 };
+      }
+
+      if (policyResult.found) {
+        const decision = evaluateBashCommandPolicy(
+          policyResult.policy,
+          command,
+        );
+        if (!decision.allowed) {
+          return { stdout: '', stderr: decision.reason, exitCode: 1 };
+        }
+      }
+
       const resolved = resolveWorkspacePath(
         workdir || '/workspace/group',
         ctx,
@@ -56,7 +73,7 @@ export function createBashTool(ctx: WorkspaceContext) {
       try {
         const { stdout, stderr } = await execAsync(command, {
           cwd: resolved.resolvedPath,
-          env: process.env,
+          env: buildSanitizedEnv(),
           timeout: timeout ?? 120000,
           maxBuffer: 10 * 1024 * 1024,
           shell: '/bin/bash',
