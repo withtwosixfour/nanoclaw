@@ -220,8 +220,8 @@ export async function runMigration(): Promise<void> {
         trigger: `@${folderName}`,
         added_at: new Date().toISOString(),
         requiresTrigger: folderName !== 'main', // main doesn't require trigger
-        modelProvider: 'opencode-zen',
-        modelName: 'kimi-k2.5',
+        modelProvider: 'google-vertex',
+        modelName: 'claude-sonnet-4-6',
         isMain: folderName === 'main',
       };
 

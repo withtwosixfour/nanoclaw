@@ -398,11 +398,11 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         modelProvider: z
           .string()
           .optional()
-          .describe('Optional model provider (for example: "opencode-zen")'),
+          .describe('Optional model provider (for example: "google-vertex")'),
         modelName: z
           .string()
           .optional()
-          .describe('Optional model name (for example: "gpt-5.3-codex")'),
+          .describe('Optional model name (for example: "claude-sonnet-4-6")'),
       }),
       execute: async (input: {
         id: string;
@@ -424,11 +424,11 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
         modelProvider: z
           .string()
           .optional()
-          .describe('Optional model provider (for example: "opencode-zen")'),
+          .describe('Optional model provider (for example: "google-vertex")'),
         modelName: z
           .string()
           .optional()
-          .describe('Optional model name (for example: "gpt-5.3-codex")'),
+          .describe('Optional model name (for example: "claude-sonnet-4-6")'),
       }),
       execute: async (input: {
         id: string;

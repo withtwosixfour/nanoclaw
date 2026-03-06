@@ -32,8 +32,8 @@ if (!agent) {
       trigger: '@nanoclaw',
       added_at: new Date().toISOString(),
       requiresTrigger: false,
-      modelProvider: 'opencode-zen',
-      modelName: 'kimi-k2.5',
+      modelProvider: 'google-vertex',
+      modelName: 'claude-sonnet-4-6',
       isMain: true,
     });
     agent = await getAgent('main');

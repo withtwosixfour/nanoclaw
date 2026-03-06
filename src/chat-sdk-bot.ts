@@ -643,8 +643,8 @@ async function executeCommand(
     if (!session) {
       return `Status: agent=${agent.id} session=none (no active session)`;
     }
-    const modelProvider = agent.modelProvider || 'opencode-zen';
-    const modelName = agent.modelName || 'kimi-k2.5';
+    const modelProvider = agent.modelProvider || 'google-vertex';
+    const modelName = agent.modelName || 'claude-sonnet-4-6';
     const messageCount = await getSessionMessageCount(
       chatJid,
       session.sessionId,

@@ -1,4 +1,6 @@
 import fs from 'fs';
+import { createVertex } from '@ai-sdk/google-vertex';
+import { createVertexAnthropic } from '@ai-sdk/google-vertex/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import path from 'path';
 import {
@@ -44,8 +46,8 @@ import {
 import { pruneToolOutputs } from '../context/prune';
 import { Name } from 'drizzle-orm';
 
-const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
-const DEFAULT_MODEL_NAME = 'kimi-k2.5';
+const DEFAULT_MODEL_PROVIDER = 'google-vertex';
+const DEFAULT_MODEL_NAME = 'claude-sonnet-4-6';
 
 const activeCompactions = new Set<string>();
 
@@ -235,16 +237,6 @@ function createModel(
   { provider: configProvider, modelName, isOpenAIResponseFormat }: ModelConfig,
   type?: 'agent' | 'compaction',
 ) {
-  const hasApiKey =
-    (process.env.OPENCODE_ZEN_API_KEY ?? process.env.ANTHROPIC_API_KEY) !=
-    undefined;
-
-  if (!hasApiKey) {
-    throw new Error(
-      'No API key available for selected model provider. Please configure either OPENCODE_ZEN_API_KEY or ANTHROPIC_API_KEY in your environment.',
-    );
-  }
-
   let baseModel;
 
   if (configProvider === 'opencode-zen') {
@@ -270,7 +262,7 @@ function createModel(
       baseModel = provider.responses(modelName);
     } else {
       logger.debug(
-        { provider: configProvider, model: modelName, hasApiKey },
+        { provider: configProvider, model: modelName },
         'Creating OpenAI-compatible model',
       );
       const provider = createOpenAICompatible({
@@ -279,6 +271,32 @@ function createModel(
         ...(apiKey ? { apiKey } : {}),
         includeUsage: true,
       });
+      baseModel = provider(modelName);
+    }
+  } else if (configProvider === 'google-vertex') {
+    const project =
+      process.env.GOOGLE_VERTEX_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT;
+    const location =
+      process.env.GOOGLE_VERTEX_LOCATION ??
+      process.env.GOOGLE_CLOUD_LOCATION ??
+      'global';
+
+    if (!project) {
+      throw new Error(
+        'GOOGLE_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT is required for google-vertex provider',
+      );
+    }
+
+    logger.debug(
+      { provider: configProvider, model: modelName, project, location },
+      'Creating Google Vertex model',
+    );
+
+    if (modelName.startsWith('claude-')) {
+      const provider = createVertexAnthropic({ project, location });
+      baseModel = provider(modelName);
+    } else {
+      const provider = createVertex({ project, location });
       baseModel = provider(modelName);
     }
   } else {
@@ -294,7 +312,7 @@ function createModel(
       {
         provider: 'anthropic',
         model: modelName,
-        hasApiKey,
+        hasApiKey: !!apiKey,
         hasAuthToken: !!authToken,
       },
       'Creating Anthropic model',

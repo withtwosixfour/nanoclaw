@@ -680,8 +680,8 @@ export function setAgent(id: string, agent: Agent): void {
       addedAt: agent.added_at,
       requiresTrigger:
         agent.requiresTrigger === undefined ? true : agent.requiresTrigger,
-      modelProvider: agent.modelProvider ?? 'opencode-zen',
-      modelName: agent.modelName ?? 'kimi-k2.5',
+      modelProvider: agent.modelProvider ?? 'google-vertex',
+      modelName: agent.modelName ?? 'claude-sonnet-4-6',
       isMain: agent.isMain === undefined ? false : agent.isMain,
     })
     .onConflictDoUpdate({
@@ -693,8 +693,8 @@ export function setAgent(id: string, agent: Agent): void {
         addedAt: agent.added_at,
         requiresTrigger:
           agent.requiresTrigger === undefined ? true : agent.requiresTrigger,
-        modelProvider: agent.modelProvider ?? 'opencode-zen',
-        modelName: agent.modelName ?? 'kimi-k2.5',
+        modelProvider: agent.modelProvider ?? 'google-vertex',
+        modelName: agent.modelName ?? 'claude-sonnet-4-6',
         isMain: agent.isMain === undefined ? false : agent.isMain,
       },
     })

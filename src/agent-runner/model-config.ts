@@ -8,16 +8,37 @@ export interface ModelConfig {
 }
 
 const DEFAULT_MODEL_CONFIG: ModelConfig = {
-  provider: 'opencode-zen',
-  modelName: 'kimi-k2.5',
-  contextWindow: 200000,
+  provider: 'google-vertex',
+  modelName: 'claude-sonnet-4-6',
+  contextWindow: 1000000,
   compactionThresholdPercent: 60,
   supportsVision: true,
 };
 
 const MODEL_CONFIGS: Record<string, ModelConfig> = {
-  'opencode-zen:kimi-k2.5': {
+  'google-vertex:claude-sonnet-4-6': {
     ...DEFAULT_MODEL_CONFIG,
+  },
+  'google-vertex:claude-opus-4-6': {
+    provider: 'google-vertex',
+    modelName: 'claude-opus-4-6',
+    contextWindow: 1000000,
+    compactionThresholdPercent: 60,
+    supportsVision: true,
+  },
+  'google-vertex:gemini-3.1-pro-preview': {
+    provider: 'google-vertex',
+    modelName: 'gemini-3.1-pro-preview',
+    contextWindow: 1048576,
+    compactionThresholdPercent: 60,
+    supportsVision: true,
+  },
+  'opencode-zen:kimi-k2.5': {
+    provider: 'opencode-zen',
+    modelName: 'kimi-k2.5',
+    contextWindow: 200000,
+    compactionThresholdPercent: 60,
+    supportsVision: true,
   },
   'opencode-zen:gpt-5.3-codex': {
     provider: 'opencode-zen',

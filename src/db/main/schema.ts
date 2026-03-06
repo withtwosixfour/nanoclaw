@@ -79,8 +79,8 @@ export const agents = sqliteTable(
     requiresTrigger: integer('requires_trigger', { mode: 'boolean' }).default(
       true,
     ),
-    modelProvider: text('model_provider').default('opencode-zen'),
-    modelName: text('model_name').default('kimi-k2.5'),
+    modelProvider: text('model_provider').default('google-vertex'),
+    modelName: text('model_name').default('claude-sonnet-4-6'),
     isMain: integer('is_main', { mode: 'boolean' }).default(false),
   },
   (table) => ({
