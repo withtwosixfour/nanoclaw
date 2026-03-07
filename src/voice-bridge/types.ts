@@ -118,11 +118,18 @@ export interface RealtimeSessionConfig {
   model: string;
   voice?: string;
   instructions: string;
+  speed?: number;
   tools: RealtimeToolDefinition[];
 }
 
 export type RealtimeEvent =
   | { type: 'session.ready'; sessionId: string }
+  | {
+      type: 'response.started';
+      sessionId: string;
+      responseId?: string;
+      status?: string;
+    }
   | {
       type: 'audio.output';
       sessionId: string;
@@ -141,6 +148,12 @@ export type RealtimeEvent =
       callId: string;
       toolName: string;
       arguments: Record<string, unknown>;
+    }
+  | {
+      type: 'response.finished';
+      sessionId: string;
+      responseId?: string;
+      status?: string;
     }
   | { type: 'response.interrupted'; sessionId: string }
   | { type: 'session.error'; sessionId: string; error: string }

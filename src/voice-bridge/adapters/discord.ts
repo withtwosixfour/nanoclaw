@@ -599,7 +599,12 @@ export class DiscordGatewayVoiceTransport {
       } satisfies VoiceEvent);
     });
 
+    let cleanedUp = false;
     const cleanup = () => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
       logger.debug(
         { sessionId: session.sessionId, userId },
         'Cleaning up Discord user audio subscription',

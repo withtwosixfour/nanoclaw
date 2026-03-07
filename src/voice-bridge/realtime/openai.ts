@@ -39,6 +39,8 @@ class OpenAIRealtimeSession implements RealtimeSession {
 
   private socket: RealtimeSocketLike | null = null;
 
+  private readonly activeResponseIds = new Set<string>();
+
   constructor(
     private readonly sessionId: string,
     private readonly socketFactory: RealtimeSocketFactory,
@@ -61,6 +63,7 @@ class OpenAIRealtimeSession implements RealtimeSession {
         sessionId: this.sessionId,
         model: config.model,
         voice: config.voice,
+        speed: config.speed,
         toolCount: config.tools.length,
       },
       'Connecting OpenAI realtime session',
@@ -82,6 +85,7 @@ class OpenAIRealtimeSession implements RealtimeSession {
             session: {
               instructions: config.instructions,
               voice: config.voice,
+              speed: config.speed,
               tools: config.tools.map((tool) => ({
                 type: 'function',
                 name: tool.name,
@@ -182,8 +186,60 @@ class OpenAIRealtimeSession implements RealtimeSession {
   }
 
   private handleMessage(raw: string): void {
-    const event = JSON.parse(raw) as Record<string, unknown>;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(raw) as Record<string, unknown>;
+    } catch (error) {
+      logger.error(
+        { err: error, sessionId: this.sessionId },
+        'Failed to parse OpenAI realtime event payload',
+      );
+      return;
+    }
+
+    const eventType = typeof event.type === 'string' ? event.type : 'unknown';
+    if (eventType !== 'response.audio.delta') {
+      logger.debug(
+        {
+          sessionId: this.sessionId,
+          eventType,
+          event: this.summarizeRealtimeEvent(event),
+        },
+        'OpenAI realtime event received',
+      );
+    }
+
     switch (event.type) {
+      case 'response.created': {
+        const response =
+          typeof event.response === 'object' && event.response !== null
+            ? (event.response as Record<string, unknown>)
+            : null;
+        const status =
+          response && typeof response.status === 'string'
+            ? response.status
+            : undefined;
+        const responseId =
+          response && typeof response.id === 'string' ? response.id : undefined;
+        if (responseId) {
+          this.activeResponseIds.add(responseId);
+        }
+        logger.info(
+          {
+            sessionId: this.sessionId,
+            responseId,
+            status,
+          },
+          'OpenAI realtime response started',
+        );
+        this.emitter.emit('event', {
+          type: 'response.started',
+          sessionId: this.sessionId,
+          responseId,
+          status,
+        } satisfies RealtimeEvent);
+        break;
+      }
       case 'response.audio.delta': {
         const audio = typeof event.delta === 'string' ? event.delta : '';
         this.emitter.emit('event', {
@@ -215,6 +271,36 @@ class OpenAIRealtimeSession implements RealtimeSession {
         } satisfies RealtimeEvent);
         break;
       }
+      case 'response.done': {
+        const response =
+          typeof event.response === 'object' && event.response !== null
+            ? (event.response as Record<string, unknown>)
+            : null;
+        const status =
+          response && typeof response.status === 'string'
+            ? response.status
+            : undefined;
+        const responseId =
+          response && typeof response.id === 'string' ? response.id : undefined;
+        if (responseId) {
+          this.activeResponseIds.delete(responseId);
+        }
+        logger.info(
+          {
+            sessionId: this.sessionId,
+            responseId,
+            status,
+          },
+          'OpenAI realtime response finished',
+        );
+        this.emitter.emit('event', {
+          type: 'response.finished',
+          sessionId: this.sessionId,
+          responseId,
+          status,
+        } satisfies RealtimeEvent);
+        break;
+      }
       case 'response.output_item.done': {
         const item = event.item as Record<string, unknown> | undefined;
         if (item?.type === 'function_call') {
@@ -240,8 +326,13 @@ class OpenAIRealtimeSession implements RealtimeSession {
         break;
       }
       case 'response.cancelled': {
+        const responseId =
+          typeof event.response_id === 'string' ? event.response_id : undefined;
+        if (responseId) {
+          this.activeResponseIds.delete(responseId);
+        }
         logger.debug(
-          { sessionId: this.sessionId },
+          { sessionId: this.sessionId, responseId },
           'OpenAI realtime response cancelled',
         );
         this.emitter.emit('event', {
@@ -294,6 +385,24 @@ class OpenAIRealtimeSession implements RealtimeSession {
     if (!this.socket) {
       throw new Error('Realtime session is not connected');
     }
+  }
+
+  private summarizeRealtimeEvent(
+    event: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const summary: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(event)) {
+      if (key === 'delta' && typeof value === 'string' && value.length > 120) {
+        summary[key] = `<omitted:${value.length} chars>`;
+        continue;
+      }
+      if (key === 'audio' && typeof value === 'string') {
+        summary[key] = `<omitted:${value.length} chars>`;
+        continue;
+      }
+      summary[key] = value;
+    }
+    return summary;
   }
 }
 
