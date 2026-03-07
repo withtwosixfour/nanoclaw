@@ -30,6 +30,10 @@ import { createAgentRuntime, AgentInput } from './agent-runner/runtime.js';
 import type { Agent, Attachment as InternalAttachment } from './types.js';
 import { saveAttachment, buildMediaNote } from './attachments/store.js';
 import { getMimeTypeFromExtension } from './attachments/images.js';
+import {
+  handleDiscordVoiceJoinCommand,
+  handleDiscordVoiceLeaveCommand,
+} from './voice-bridge/discord-service.js';
 import path from 'path';
 import fs from 'fs';
 import type { Logger as PinoLogger } from 'pino';
@@ -691,6 +695,30 @@ Add this to your \`ROUTES\` in \`src/router.ts\`:
     child.unref();
 
     return 'Update in progress... The bot will restart shortly.';
+  } else if (normalizedCommand === 'voice-join') {
+    const parts = chatJid.split(':');
+    if (parts[0] !== 'discord' || !parts[1] || parts[1] === '@me') {
+      return 'Voice join is currently only supported in Discord guild channels.';
+    }
+    if (!sender) {
+      return 'Could not determine which Discord user invoked this command.';
+    }
+
+    return await handleDiscordVoiceJoinCommand({
+      guildId: parts[1],
+      userId: sender,
+      summonChannelId: parts[parts.length - 1],
+      linkedTextThreadId: chatJid,
+    });
+  } else if (normalizedCommand === 'voice-leave') {
+    const parts = chatJid.split(':');
+    if (parts[0] !== 'discord' || !parts[1] || parts[1] === '@me') {
+      return 'Voice leave is currently only supported in Discord guild channels.';
+    }
+
+    return await handleDiscordVoiceLeaveCommand({
+      guildId: parts[1],
+    });
   }
 
   return `Unknown command: ${command}`;
@@ -845,7 +873,16 @@ export async function createChatSdkBot(): Promise<Chat> {
     const trimmed = content.trim();
     if (trimmed.startsWith('/')) {
       const command = trimmed.slice(1).toLowerCase();
-      if (['clear', 'status', 'chatid', 'update'].includes(command)) {
+      if (
+        [
+          'clear',
+          'status',
+          'chatid',
+          'update',
+          'voice-join',
+          'voice-leave',
+        ].includes(command)
+      ) {
         const response = await executeCommand(
           thread.id,
           command,
@@ -993,6 +1030,24 @@ export async function createChatSdkBot(): Promise<Chat> {
 
   bot.onSlashCommand('update', async ({ channel, user }) => {
     const response = await executeCommand(channel.id, 'update', user.userId);
+    await channel.post(response);
+  });
+
+  bot.onSlashCommand('voice-join', async ({ channel, user }) => {
+    const response = await executeCommand(
+      channel.id,
+      'voice-join',
+      user.userId,
+    );
+    await channel.post(response);
+  });
+
+  bot.onSlashCommand('voice-leave', async ({ channel, user }) => {
+    const response = await executeCommand(
+      channel.id,
+      'voice-leave',
+      user.userId,
+    );
     await channel.post(response);
   });
 

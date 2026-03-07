@@ -1,41 +1,14 @@
-import {
-  GuildMember,
-  type ChatInputCommandInteraction,
-  type Message,
-} from 'discord.js';
+import { GuildMember, type Message } from 'discord.js';
 
 import { logger } from '../logger.js';
 import {
   DiscordGatewayVoiceTransport,
   DiscordVoiceAdapter,
-  isDiscordVoiceJoinCommand,
-  isDiscordVoiceLeaveCommand,
 } from './adapters/discord.js';
 import type { VoiceBridgeSessionManager } from './core/session-manager.js';
 
-function getInteractionVoiceChannel(
-  interaction: ChatInputCommandInteraction,
-): { guildId: string; channelId: string; member: GuildMember } | null {
-  if (!interaction.inGuild() || !interaction.guildId) {
-    return null;
-  }
-
-  const member = interaction.member;
-  if (!member || !(member instanceof GuildMember)) {
-    return null;
-  }
-
-  const voiceChannel = member.voice.channel;
-  if (!voiceChannel) {
-    return null;
-  }
-
-  return {
-    guildId: interaction.guildId,
-    channelId: voiceChannel.id,
-    member,
-  };
-}
+let discordVoiceManager: VoiceBridgeSessionManager | null = null;
+let discordVoiceTransport: DiscordGatewayVoiceTransport | null = null;
 
 function getMessageVoiceChannel(
   message: Message,
@@ -65,6 +38,7 @@ async function startDiscordVoiceSession(input: {
   guildId: string;
   voiceChannelId: string;
   summonChannelId?: string;
+  linkedTextThreadId?: string;
   startedBy: string;
   participants: Array<{ participantId: string; displayName: string }>;
 }): Promise<{ alreadyActive: boolean }> {
@@ -103,7 +77,10 @@ async function startDiscordVoiceSession(input: {
     routeKey,
     startedBy: input.startedBy,
     participants: input.participants,
-    link: linkedTextThreadId ? { textThreadId: linkedTextThreadId } : undefined,
+    link:
+      (input.linkedTextThreadId ?? linkedTextThreadId)
+        ? { textThreadId: input.linkedTextThreadId ?? linkedTextThreadId }
+        : undefined,
     metadata: {
       summonChannelId: input.summonChannelId,
       guildId: input.guildId,
@@ -160,6 +137,103 @@ async function stopDiscordVoiceSession(input: {
   return 'stopped';
 }
 
+async function getGuildMemberVoiceChannel(input: {
+  guildId: string;
+  userId: string;
+}): Promise<{
+  guildId: string;
+  channelId: string;
+  member: GuildMember;
+} | null> {
+  if (!discordVoiceTransport) {
+    logger.warn('Discord voice transport is not initialized');
+    return null;
+  }
+
+  const client = discordVoiceTransport.getClient();
+  const guild = await client.guilds.fetch(input.guildId);
+  const member = await guild.members.fetch(input.userId);
+
+  if (!member.voice.channel) {
+    return null;
+  }
+
+  return {
+    guildId: input.guildId,
+    channelId: member.voice.channel.id,
+    member,
+  };
+}
+
+export async function handleDiscordVoiceJoinCommand(input: {
+  guildId: string;
+  userId: string;
+  summonChannelId?: string;
+  linkedTextThreadId?: string;
+}): Promise<string> {
+  if (!discordVoiceManager) {
+    logger.warn(
+      { guildId: input.guildId },
+      'Discord voice manager is not initialized',
+    );
+    return 'Discord voice is not initialized yet.';
+  }
+
+  const voiceState = await getGuildMemberVoiceChannel({
+    guildId: input.guildId,
+    userId: input.userId,
+  });
+
+  if (!voiceState) {
+    return 'Join a voice channel first, then try again.';
+  }
+
+  const participants = Array.from(
+    voiceState.member.voice.channel!.members.values(),
+  ).map((member) => ({
+    participantId: member.id,
+    displayName: member.displayName,
+  }));
+
+  const result = await startDiscordVoiceSession({
+    manager: discordVoiceManager,
+    guildId: voiceState.guildId,
+    voiceChannelId: voiceState.channelId,
+    summonChannelId: input.summonChannelId,
+    linkedTextThreadId: input.linkedTextThreadId,
+    startedBy: input.userId,
+    participants,
+  });
+
+  return result.alreadyActive
+    ? `NanoClaw is already active in <#${voiceState.channelId}>.`
+    : `Joining <#${voiceState.channelId}> and starting a realtime voice session.`;
+}
+
+export async function handleDiscordVoiceLeaveCommand(input: {
+  guildId: string;
+  userId?: string;
+  voiceChannelId?: string;
+}): Promise<string> {
+  if (!discordVoiceManager) {
+    logger.warn(
+      { guildId: input.guildId },
+      'Discord voice manager is not initialized',
+    );
+    return 'Discord voice is not initialized yet.';
+  }
+
+  const result = await stopDiscordVoiceSession({
+    manager: discordVoiceManager,
+    guildId: input.guildId,
+    voiceChannelId: input.voiceChannelId,
+  });
+
+  return result === 'stopped'
+    ? 'Leaving the active NanoClaw voice session.'
+    : 'No active NanoClaw voice session found in this guild.';
+}
+
 export async function createDiscordVoiceIntegration(
   manager: VoiceBridgeSessionManager,
 ): Promise<DiscordVoiceAdapter | null> {
@@ -176,107 +250,9 @@ export async function createDiscordVoiceIntegration(
     process.env.DISCORD_VOICE_COMMAND_GUILD_ID,
   );
   const adapter = new DiscordVoiceAdapter(transport);
+  discordVoiceManager = manager;
+  discordVoiceTransport = transport;
   logger.info('Creating Discord voice integration');
-
-  transport.getClient().on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) {
-      return;
-    }
-
-    logger.debug(
-      {
-        commandName: interaction.commandName,
-        guildId: interaction.guildId,
-        channelId: interaction.channelId,
-        userId: interaction.user.id,
-      },
-      'Received Discord interaction for voice service',
-    );
-
-    if (isDiscordVoiceJoinCommand(interaction)) {
-      const voiceState = getInteractionVoiceChannel(interaction);
-      if (!voiceState) {
-        logger.warn(
-          { guildId: interaction.guildId, userId: interaction.user.id },
-          'Discord join command issued without user in a voice channel',
-        );
-        await interaction.reply({
-          content: 'Join a voice channel first, then run `/voice-join`.',
-          ephemeral: true,
-        });
-        return;
-      }
-
-      const participants = Array.from(
-        voiceState.member.voice.channel!.members.values(),
-      ).map((member) => ({
-        participantId: member.id,
-        displayName: member.displayName,
-      }));
-
-      try {
-        const result = await startDiscordVoiceSession({
-          manager,
-          guildId: voiceState.guildId,
-          voiceChannelId: voiceState.channelId,
-          summonChannelId: interaction.channelId,
-          startedBy: interaction.user.id,
-          participants,
-        });
-
-        if (result.alreadyActive) {
-          await interaction.reply({
-            content: `NanoClaw is already active in <#${voiceState.channelId}>.`,
-            ephemeral: true,
-          });
-          return;
-        }
-
-        await interaction.reply({
-          content: `Joining <#${voiceState.channelId}> and starting a realtime voice session.`,
-          ephemeral: true,
-        });
-      } catch (err) {
-        logger.error({ err }, 'Failed to start Discord voice session');
-        await interaction.reply({
-          content: `Failed to join voice: ${err instanceof Error ? err.message : String(err)}`,
-          ephemeral: true,
-        });
-      }
-      return;
-    }
-
-    if (isDiscordVoiceLeaveCommand(interaction)) {
-      logger.debug(
-        {
-          guildId: interaction.guildId,
-          channelId: interaction.channelId,
-          userId: interaction.user.id,
-        },
-        'Processing Discord voice leave command',
-      );
-      const voiceState = getInteractionVoiceChannel(interaction);
-      const result = interaction.guildId
-        ? await stopDiscordVoiceSession({
-            manager,
-            guildId: interaction.guildId,
-            voiceChannelId: voiceState?.channelId,
-          })
-        : 'not_found';
-
-      if (result === 'not_found') {
-        await interaction.reply({
-          content: 'No active NanoClaw voice session found in this guild.',
-          ephemeral: true,
-        });
-        return;
-      }
-      await interaction.reply({
-        content: 'Leaving the active NanoClaw voice session.',
-        ephemeral: true,
-      });
-    }
-  });
 
   transport.getClient().on('messageCreate', async (message) => {
     if (message.author.bot || !message.guildId) {
