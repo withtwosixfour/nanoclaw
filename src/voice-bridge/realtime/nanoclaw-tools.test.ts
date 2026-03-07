@@ -1,25 +1,26 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import { z } from 'zod';
+import { describe, expect, it, vi } from 'vitest';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+const sendMessageToolExecute = vi.fn(async (args: { text: string }) => ({
+  ok: true,
+  text: args.text,
+}));
 
-const originalCwd = process.cwd();
+vi.mock('../../agent-runner/tool-registry.js', () => ({
+  createBaseTools: vi.fn(() => ({
+    send_message: {
+      description: 'Send message',
+      inputSchema: z.object({ text: z.string() }),
+      execute: sendMessageToolExecute,
+    },
+  })),
+}));
+
+import { createRealtimeToolBridge } from './nanoclaw-tools.js';
 
 describe('realtime tool bridge', () => {
-  afterEach(() => {
-    process.chdir(originalCwd);
-    vi.resetModules();
-  });
-
-  it('exposes tool definitions and routes send_message to linked text thread', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-tools-'));
-    fs.mkdirSync(path.join(tempDir, 'agents', 'main'), { recursive: true });
-    fs.mkdirSync(path.join(tempDir, 'agents', 'global'), { recursive: true });
-    process.chdir(tempDir);
-
+  it('exposes tool definitions and delegates execution', async () => {
     const sendMessage = vi.fn();
-    const { createRealtimeToolBridge } = await import('./nanoclaw-tools.js');
     const bridge = createRealtimeToolBridge({
       agentId: 'main',
       isMain: true,
@@ -41,10 +42,9 @@ describe('realtime tool bridge', () => {
     ).toBe(true);
 
     await bridge.execute('send_message', { text: 'hello from voice' });
-    expect(sendMessage).toHaveBeenCalledWith(
-      'discord:guild-1:thread-1',
-      'hello from voice',
-      undefined,
-    );
+    expect(sendMessageToolExecute).toHaveBeenCalledWith({
+      text: 'hello from voice',
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });

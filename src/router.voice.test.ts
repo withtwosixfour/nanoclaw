@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const getAllRoutes = vi.fn();
+const { getAllRoutes } = vi.hoisted(() => ({
+  getAllRoutes: vi.fn(),
+}));
+
+import { resolveAgentId } from './router.js';
 
 vi.mock('./db.js', () => ({
   getAllRoutes,
@@ -16,7 +20,6 @@ describe('resolveAgentId voice routing', () => {
       'voice:discord:*': 'main',
     });
 
-    const { resolveAgentId } = await import('./router.js');
     await expect(
       resolveAgentId('voice:discord:guild-1:channel-2'),
     ).resolves.toBe('main');
@@ -27,7 +30,6 @@ describe('resolveAgentId voice routing', () => {
       'discord:channel-2': 'ops',
     });
 
-    const { resolveAgentId } = await import('./router.js');
     await expect(resolveAgentId('discord:guild-1:channel-2')).resolves.toBe(
       'ops',
     );

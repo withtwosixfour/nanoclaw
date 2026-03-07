@@ -11,9 +11,16 @@ const dbFns = {
 };
 
 const resolveVoiceAgent = vi.fn();
+const executeTool = vi.fn(async () => ({ ok: true }));
 
 vi.mock('../../db.js', () => dbFns);
 vi.mock('./route-resolver.js', () => ({ resolveVoiceAgent }));
+vi.mock('../realtime/nanoclaw-tools.js', () => ({
+  createRealtimeToolBridge: vi.fn(() => ({
+    definitions: [],
+    execute: executeTool,
+  })),
+}));
 
 class FakeAdapter extends EventEmitter {
   platform = 'discord' as const;
@@ -119,6 +126,9 @@ describe('VoiceBridgeSessionManager', () => {
     });
 
     await vi.waitFor(() => {
+      expect(executeTool).toHaveBeenCalledWith('send_message', {
+        text: 'hello',
+      });
       expect(realtime.sendToolResult).toHaveBeenCalled();
     });
   });

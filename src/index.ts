@@ -17,6 +17,7 @@ import {
   shutdownPostHog,
 } from './agent-runner/runtime';
 import { initializeVoiceBridge } from './voice-bridge/bootstrap';
+import { createDiscordVoiceIntegration } from './voice-bridge/discord-service';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router';
@@ -157,7 +158,7 @@ async function main(): Promise<void> {
 
   await createChatSdkBot();
 
-  await initializeVoiceBridge({
+  const voiceBridge = await initializeVoiceBridge({
     sendMessage: async (jid, text, sender) => {
       await sendMessageToJid(jid, text);
       if (sender) {
@@ -166,6 +167,16 @@ async function main(): Promise<void> {
     },
     schedulerDeps,
   });
+
+  if (voiceBridge) {
+    const discordVoiceAdapter =
+      await createDiscordVoiceIntegration(voiceBridge);
+    if (discordVoiceAdapter) {
+      voiceBridge.registerAdapter(discordVoiceAdapter);
+      await discordVoiceAdapter.connect();
+      logger.info('Discord voice adapter initialized');
+    }
+  }
 
   logger.info('Bot is running. Waiting for events...');
 }

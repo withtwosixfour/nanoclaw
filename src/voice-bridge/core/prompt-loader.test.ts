@@ -1,32 +1,13 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import { describe, expect, it, vi } from 'vitest';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+vi.mock('../../agent-runner/prompt-loader.js', () => ({
+  buildAgentSystemPrompt: vi.fn(() => 'Agent prompt\n\nGlobal prompt'),
+}));
 
-const originalCwd = process.cwd();
+import { buildVoiceSystemPrompt } from './prompt-loader.js';
 
 describe('voice prompt loader', () => {
-  afterEach(() => {
-    process.chdir(originalCwd);
-    vi.resetModules();
-  });
-
-  it('builds prompt with agent, global, and voice guidance', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-prompt-'));
-    fs.mkdirSync(path.join(tempDir, 'agents', 'main'), { recursive: true });
-    fs.mkdirSync(path.join(tempDir, 'agents', 'global'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tempDir, 'agents', 'main', 'CLAUDE.md'),
-      'Agent prompt',
-    );
-    fs.writeFileSync(
-      path.join(tempDir, 'agents', 'global', 'CLAUDE.md'),
-      'Global prompt',
-    );
-    process.chdir(tempDir);
-
-    const { buildVoiceSystemPrompt } = await import('./prompt-loader.js');
+  it('builds prompt with agent, global, and voice guidance', () => {
     const prompt = buildVoiceSystemPrompt({
       agentId: 'main',
       isMain: false,

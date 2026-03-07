@@ -109,6 +109,28 @@ export class VoiceBridgeSessionManager {
     this.emitter.on('event', handler);
   }
 
+  listActiveSessions(): VoiceSessionRecord[] {
+    return Array.from(this.activeSessions.values()).map(
+      (session) => session.record,
+    );
+  }
+
+  findActiveSessionByPlatform(
+    platform: VoiceSessionRecord['platform'],
+    platformSessionId: string,
+  ): VoiceSessionRecord | null {
+    for (const active of this.activeSessions.values()) {
+      if (
+        active.record.platform === platform &&
+        active.record.platformSessionId === platformSessionId
+      ) {
+        return active.record;
+      }
+    }
+
+    return null;
+  }
+
   private async createVoiceSessionRecord(input: {
     adapter: VoicePlatformAdapter;
     agent: Agent;
