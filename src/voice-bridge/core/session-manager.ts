@@ -9,6 +9,10 @@ import {
 } from '../../db.js';
 import { logger } from '../../logger.js';
 import type { Agent } from '../../types.js';
+import {
+  estimatePcmDurationMs,
+  voiceStreamDiagnosticsEnabled,
+} from '../diagnostics.js';
 import { createRealtimeToolBridge } from '../realtime/nanoclaw-tools.js';
 import {
   RealtimeSessionFactory,
@@ -40,6 +44,14 @@ interface ActiveVoiceSession {
   realtime: ReturnType<RealtimeSessionFactory['create']>;
 }
 
+interface OutputDispatchDiagnostics {
+  chunkCount: number;
+  totalBytes: number;
+  responseStartedAtMs?: number;
+  firstChunkAtMs?: number;
+  lastChunkAtMs?: number;
+}
+
 export class VoiceBridgeSessionManager {
   private readonly emitter = new EventEmitter();
 
@@ -52,6 +64,11 @@ export class VoiceBridgeSessionManager {
   private readonly pendingSpeechInterrupts = new Map<string, NodeJS.Timeout>();
 
   private readonly activeResponseBySession = new Map<string, boolean>();
+
+  private readonly outputDiagnosticsBySession = new Map<
+    string,
+    OutputDispatchDiagnostics
+  >();
 
   private static readonly SPEECH_INTERRUPT_DEBOUNCE_MS = 250;
 
@@ -247,7 +264,6 @@ export class VoiceBridgeSessionManager {
       voice: process.env.OPENAI_REALTIME_VOICE || 'cedar',
       input_audio_noise_reduction: 'far_field',
       instructions: effectivePrompt,
-      speed: 1.3,
       tools: toolBridge.definitions,
     };
 
@@ -409,6 +425,11 @@ export class VoiceBridgeSessionManager {
     switch (event.type) {
       case 'response.started': {
         this.activeResponseBySession.set(voiceSessionId, true);
+        this.outputDiagnosticsBySession.set(voiceSessionId, {
+          chunkCount: 0,
+          totalBytes: 0,
+          responseStartedAtMs: Date.now(),
+        });
         const speechStoppedAt = this.lastSpeechStoppedAtMs.get(voiceSessionId);
         const latencyMs =
           typeof speechStoppedAt === 'number'
@@ -426,13 +447,58 @@ export class VoiceBridgeSessionManager {
         this.lastSpeechStoppedAtMs.delete(voiceSessionId);
         break;
       }
-      case 'audio.output':
+      case 'audio.output': {
+        const diagnostics = this.outputDiagnosticsBySession.get(
+          voiceSessionId,
+        ) ?? {
+          chunkCount: 0,
+          totalBytes: 0,
+        };
+        const now = Date.now();
+        diagnostics.chunkCount += 1;
+        diagnostics.totalBytes += event.pcm16.length;
+        diagnostics.firstChunkAtMs ??= now;
+        const gapSincePreviousAudioChunkMs =
+          typeof diagnostics.lastChunkAtMs === 'number'
+            ? now - diagnostics.lastChunkAtMs
+            : undefined;
+        diagnostics.lastChunkAtMs = now;
+        this.outputDiagnosticsBySession.set(voiceSessionId, diagnostics);
+
+        const sendStartedAtMs = Date.now();
         await active.adapter.sendAudio(
           active.record.platformSessionId,
           event.pcm16,
           event.sampleRate,
         );
+        const adapterSendDurationMs = Date.now() - sendStartedAtMs;
+
+        if (voiceStreamDiagnosticsEnabled) {
+          logger.info(
+            {
+              voiceSessionId,
+              platform: active.record.platform,
+              platformSessionId: active.record.platformSessionId,
+              audioChunkIndex: diagnostics.chunkCount,
+              pcmBytes: event.pcm16.length,
+              sampleRate: event.sampleRate,
+              estimatedDurationMs: estimatePcmDurationMs(
+                event.pcm16.length,
+                event.sampleRate,
+              ),
+              gapSincePreviousAudioChunkMs,
+              latencyFromResponseStartedMs:
+                typeof diagnostics.responseStartedAtMs === 'number' &&
+                diagnostics.chunkCount === 1
+                  ? now - diagnostics.responseStartedAtMs
+                  : undefined,
+              adapterSendDurationMs,
+            },
+            'Forwarded realtime audio chunk to voice adapter',
+          );
+        }
         break;
+      }
       case 'transcript.final':
         logger.debug(
           { voiceSessionId, role: event.role, length: event.text.length },
@@ -478,14 +544,40 @@ export class VoiceBridgeSessionManager {
       }
       case 'response.finished':
         this.activeResponseBySession.set(voiceSessionId, false);
+        const diagnostics = this.outputDiagnosticsBySession.get(voiceSessionId);
         logger.info(
           {
             voiceSessionId,
             responseId: event.responseId,
             status: event.status,
+            outputChunkCount: diagnostics?.chunkCount,
+            outputAudioBytes: diagnostics?.totalBytes,
+            outputAudioDurationMs:
+              typeof diagnostics?.totalBytes === 'number'
+                ? estimatePcmDurationMs(diagnostics.totalBytes, 24000)
+                : undefined,
+            timeToFirstOutputChunkMs:
+              diagnostics?.responseStartedAtMs && diagnostics.firstChunkAtMs
+                ? diagnostics.firstChunkAtMs - diagnostics.responseStartedAtMs
+                : undefined,
           },
           'Realtime model response finished',
         );
+        this.outputDiagnosticsBySession.delete(voiceSessionId);
+        break;
+      case 'response.interrupted':
+        logger.info(
+          {
+            voiceSessionId,
+            outputChunkCount:
+              this.outputDiagnosticsBySession.get(voiceSessionId)?.chunkCount,
+            outputAudioBytes:
+              this.outputDiagnosticsBySession.get(voiceSessionId)?.totalBytes,
+          },
+          'Realtime model response interrupted',
+        );
+        this.activeResponseBySession.set(voiceSessionId, false);
+        this.outputDiagnosticsBySession.delete(voiceSessionId);
         break;
       case 'session.error':
         logger.error(
@@ -497,6 +589,7 @@ export class VoiceBridgeSessionManager {
         this.lastSpeechStoppedAtMs.delete(voiceSessionId);
         this.activeResponseBySession.delete(voiceSessionId);
         this.activeSessions.delete(voiceSessionId);
+        this.outputDiagnosticsBySession.delete(voiceSessionId);
         break;
       case 'session.closed':
         logger.info({ voiceSessionId }, 'Realtime voice session closed');
@@ -504,6 +597,7 @@ export class VoiceBridgeSessionManager {
         this.clearSessionSpeechState(voiceSessionId);
         this.lastSpeechStoppedAtMs.delete(voiceSessionId);
         this.activeResponseBySession.delete(voiceSessionId);
+        this.outputDiagnosticsBySession.delete(voiceSessionId);
         this.activeSessions.delete(voiceSessionId);
         break;
       default:

@@ -33,6 +33,10 @@ import {
 import prism from 'prism-media';
 
 import { logger } from '../../logger.js';
+import {
+  estimatePcmDurationMs,
+  voiceStreamDiagnosticsEnabled,
+} from '../diagnostics.js';
 import type {
   VoiceEvent,
   VoicePlatform,
@@ -115,6 +119,10 @@ interface ActiveDiscordSession {
   outputStream: PassThrough;
   outputResource: ReturnType<typeof createAudioResource>;
   subscribedUsers: Set<string>;
+  outputChunkCount: number;
+  outputBytesQueued: number;
+  lastOutputChunkAtMs?: number;
+  outputResetCount: number;
 }
 
 export class DiscordGatewayVoiceTransport {
@@ -374,6 +382,9 @@ export class DiscordGatewayVoiceTransport {
       outputStream,
       outputResource,
       subscribedUsers: new Set(),
+      outputChunkCount: 0,
+      outputBytesQueued: 0,
+      outputResetCount: 0,
     };
     this.sessions.set(sessionId, active);
 
@@ -480,12 +491,50 @@ export class DiscordGatewayVoiceTransport {
     }
 
     const discordPcm = pcmMonoToDiscordStereo48kForTest(pcm16, sampleRate);
-    session.outputStream.write(discordPcm);
+    const now = Date.now();
+    const queueDepthBytesBefore = session.outputStream.writableLength;
+    const gapSincePreviousChunkMs =
+      typeof session.lastOutputChunkAtMs === 'number'
+        ? now - session.lastOutputChunkAtMs
+        : undefined;
+    session.outputChunkCount += 1;
+    session.outputBytesQueued += discordPcm.length;
+    session.lastOutputChunkAtMs = now;
+
+    const writeAccepted = session.outputStream.write(discordPcm);
+
+    if (voiceStreamDiagnosticsEnabled || !writeAccepted) {
+      logger[writeAccepted ? 'info' : 'warn'](
+        {
+          sessionId,
+          audioChunkIndex: session.outputChunkCount,
+          inputSampleRate: sampleRate,
+          inputBytes: pcm16.length,
+          inputEstimatedDurationMs: estimatePcmDurationMs(
+            pcm16.length,
+            sampleRate,
+          ),
+          discordBytes: discordPcm.length,
+          discordEstimatedDurationMs: estimatePcmDurationMs(
+            discordPcm.length,
+            48000,
+            2,
+          ),
+          gapSincePreviousChunkMs,
+          queueDepthBytesBefore,
+          queueDepthBytesAfter: session.outputStream.writableLength,
+          writeAccepted,
+        },
+        writeAccepted
+          ? 'Queued Discord output audio chunk'
+          : 'Discord output stream applied backpressure while queueing audio',
+      );
+    }
   }
 
   async interruptOutput(sessionId: string): Promise<void> {
     logger.debug({ sessionId }, 'Interrupting Discord voice output');
-    this.resetOutputStream(sessionId);
+    this.resetOutputStream(sessionId, 'interrupt');
   }
 
   onEvent(handler: (event: VoiceEvent) => void): void {
@@ -713,7 +762,7 @@ export class DiscordGatewayVoiceTransport {
     } satisfies VoiceEvent);
   }
 
-  private resetOutputStream(sessionId: string): void {
+  private resetOutputStream(sessionId: string, reason = 'unspecified'): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
       logger.warn(
@@ -723,7 +772,19 @@ export class DiscordGatewayVoiceTransport {
       return;
     }
 
-    logger.debug({ sessionId }, 'Resetting Discord output stream');
+    session.outputResetCount += 1;
+
+    logger.debug(
+      {
+        sessionId,
+        reason,
+        outputResetCount: session.outputResetCount,
+        outputChunkCount: session.outputChunkCount,
+        outputBytesQueued: session.outputBytesQueued,
+        bufferedBytesBeforeReset: session.outputStream.writableLength,
+      },
+      'Resetting Discord output stream',
+    );
 
     session.outputStream.end();
     session.outputStream = new PassThrough();
@@ -733,6 +794,9 @@ export class DiscordGatewayVoiceTransport {
     });
     session.player.play(session.outputResource);
     session.connection.subscribe(session.player);
+    session.outputChunkCount = 0;
+    session.outputBytesQueued = 0;
+    session.lastOutputChunkAtMs = undefined;
   }
 }
 

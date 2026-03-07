@@ -2,6 +2,10 @@ import EventEmitter from 'events';
 import WebSocket from 'ws';
 
 import { logger } from '../../logger.js';
+import {
+  estimatePcmDurationMs,
+  voiceStreamDiagnosticsEnabled,
+} from '../diagnostics.js';
 import type {
   RealtimeEvent,
   RealtimeSession,
@@ -40,6 +44,22 @@ class OpenAIRealtimeSession implements RealtimeSession {
   private socket: RealtimeSocketLike | null = null;
 
   private readonly activeResponseIds = new Set<string>();
+
+  private audioOutputChunkCount = 0;
+
+  private audioOutputBytes = 0;
+
+  private responseAudioChunkCount = 0;
+
+  private responseAudioBytes = 0;
+
+  private currentResponseId?: string;
+
+  private responseStartedAtMs?: number;
+
+  private firstAudioChunkAtMs?: number;
+
+  private lastAudioChunkAtMs?: number;
 
   constructor(
     private readonly sessionId: string,
@@ -224,6 +244,12 @@ class OpenAIRealtimeSession implements RealtimeSession {
         if (responseId) {
           this.activeResponseIds.add(responseId);
         }
+        this.currentResponseId = responseId;
+        this.responseAudioChunkCount = 0;
+        this.responseAudioBytes = 0;
+        this.responseStartedAtMs = Date.now();
+        this.firstAudioChunkAtMs = undefined;
+        this.lastAudioChunkAtMs = undefined;
         logger.info(
           {
             sessionId: this.sessionId,
@@ -242,14 +268,68 @@ class OpenAIRealtimeSession implements RealtimeSession {
       }
       case 'response.audio.delta': {
         const audio = typeof event.delta === 'string' ? event.delta : '';
+        const pcm16 = Buffer.from(audio, 'base64');
+        const sampleRate =
+          typeof event.sample_rate_hz === 'number'
+            ? event.sample_rate_hz
+            : 24000;
+        const now = Date.now();
+        const gapSincePreviousAudioChunkMs =
+          typeof this.lastAudioChunkAtMs === 'number'
+            ? now - this.lastAudioChunkAtMs
+            : undefined;
+        const latencyFromResponseStartedMs =
+          typeof this.responseStartedAtMs === 'number' &&
+          typeof this.firstAudioChunkAtMs !== 'number'
+            ? now - this.responseStartedAtMs
+            : undefined;
+
+        this.audioOutputChunkCount += 1;
+        this.audioOutputBytes += pcm16.length;
+        this.responseAudioChunkCount += 1;
+        this.responseAudioBytes += pcm16.length;
+        this.firstAudioChunkAtMs ??= now;
+        this.lastAudioChunkAtMs = now;
+
+        if (voiceStreamDiagnosticsEnabled) {
+          logger.info(
+            {
+              sessionId: this.sessionId,
+              responseId:
+                typeof event.response_id === 'string'
+                  ? event.response_id
+                  : this.currentResponseId,
+              itemId:
+                typeof event.item_id === 'string' ? event.item_id : undefined,
+              outputIndex:
+                typeof event.output_index === 'number'
+                  ? event.output_index
+                  : undefined,
+              contentIndex:
+                typeof event.content_index === 'number'
+                  ? event.content_index
+                  : undefined,
+              audioChunkIndex: this.audioOutputChunkCount,
+              responseAudioChunkIndex: this.responseAudioChunkCount,
+              base64Chars: audio.length,
+              pcmBytes: pcm16.length,
+              sampleRate,
+              estimatedDurationMs: estimatePcmDurationMs(
+                pcm16.length,
+                sampleRate,
+              ),
+              gapSincePreviousAudioChunkMs,
+              latencyFromResponseStartedMs,
+            },
+            'OpenAI realtime audio delta received',
+          );
+        }
+
         this.emitter.emit('event', {
           type: 'audio.output',
           sessionId: this.sessionId,
-          pcm16: Buffer.from(audio, 'base64'),
-          sampleRate:
-            typeof event.sample_rate_hz === 'number'
-              ? event.sample_rate_hz
-              : 24000,
+          pcm16,
+          sampleRate,
         } satisfies RealtimeEvent);
         break;
       }
@@ -290,9 +370,26 @@ class OpenAIRealtimeSession implements RealtimeSession {
             sessionId: this.sessionId,
             responseId,
             status,
+            responseAudioChunkCount: this.responseAudioChunkCount,
+            responseAudioBytes: this.responseAudioBytes,
+            responseAudioDurationMs: estimatePcmDurationMs(
+              this.responseAudioBytes,
+              24000,
+            ),
+            timeToFirstAudioChunkMs:
+              typeof this.responseStartedAtMs === 'number' &&
+              typeof this.firstAudioChunkAtMs === 'number'
+                ? this.firstAudioChunkAtMs - this.responseStartedAtMs
+                : undefined,
           },
           'OpenAI realtime response finished',
         );
+        this.currentResponseId = undefined;
+        this.responseStartedAtMs = undefined;
+        this.firstAudioChunkAtMs = undefined;
+        this.lastAudioChunkAtMs = undefined;
+        this.responseAudioChunkCount = 0;
+        this.responseAudioBytes = 0;
         this.emitter.emit('event', {
           type: 'response.finished',
           sessionId: this.sessionId,
@@ -332,9 +429,20 @@ class OpenAIRealtimeSession implements RealtimeSession {
           this.activeResponseIds.delete(responseId);
         }
         logger.debug(
-          { sessionId: this.sessionId, responseId },
+          {
+            sessionId: this.sessionId,
+            responseId,
+            responseAudioChunkCount: this.responseAudioChunkCount,
+            responseAudioBytes: this.responseAudioBytes,
+          },
           'OpenAI realtime response cancelled',
         );
+        this.currentResponseId = undefined;
+        this.responseStartedAtMs = undefined;
+        this.firstAudioChunkAtMs = undefined;
+        this.lastAudioChunkAtMs = undefined;
+        this.responseAudioChunkCount = 0;
+        this.responseAudioBytes = 0;
         this.emitter.emit('event', {
           type: 'response.interrupted',
           sessionId: this.sessionId,
