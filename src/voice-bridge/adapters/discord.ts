@@ -46,6 +46,8 @@ import type {
 const VOICE_JOIN_COMMAND = 'voice-join';
 const VOICE_LEAVE_COMMAND = 'voice-leave';
 const require = createRequire(import.meta.url);
+const DISCORD_SPEECH_STOP_DEBOUNCE_MS = 300;
+const DISCORD_USER_AUDIO_END_SILENCE_MS = 400;
 
 function hasAnyDiscordEncryptionLibrary(): boolean {
   const candidates = [
@@ -110,6 +112,13 @@ export function pcmMonoToDiscordStereo48kForTest(
   return stereo;
 }
 
+export function hasInterruptibleDiscordOutputForTest(input: {
+  outputChunkCount: number;
+  bufferedBytes: number;
+}): boolean {
+  return input.outputChunkCount > 0 || input.bufferedBytes > 0;
+}
+
 interface ActiveDiscordSession {
   sessionId: string;
   guildId: string;
@@ -119,6 +128,7 @@ interface ActiveDiscordSession {
   outputStream: PassThrough;
   outputResource: ReturnType<typeof createAudioResource>;
   subscribedUsers: Set<string>;
+  pendingSpeechStopTimers: Map<string, NodeJS.Timeout>;
   outputChunkCount: number;
   outputBytesQueued: number;
   lastOutputChunkAtMs?: number;
@@ -382,6 +392,7 @@ export class DiscordGatewayVoiceTransport {
       outputStream,
       outputResource,
       subscribedUsers: new Set(),
+      pendingSpeechStopTimers: new Map(),
       outputChunkCount: 0,
       outputBytesQueued: 0,
       outputResetCount: 0,
@@ -389,6 +400,26 @@ export class DiscordGatewayVoiceTransport {
     this.sessions.set(sessionId, active);
 
     connection.receiver.speaking.on('start', (userId) => {
+      const pendingStopTimer = active.pendingSpeechStopTimers.get(userId);
+      if (pendingStopTimer) {
+        clearTimeout(pendingStopTimer);
+        active.pendingSpeechStopTimers.delete(userId);
+        logger.debug(
+          { sessionId, userId, debounceMs: DISCORD_SPEECH_STOP_DEBOUNCE_MS },
+          'Coalescing rapid Discord speech restart',
+        );
+        this.subscribeToUserAudio(active, userId);
+        return;
+      }
+
+      logger.debug(
+        {
+          sessionId,
+          userId,
+          subscribedUsers: active.subscribedUsers.size,
+        },
+        'Discord receiver speaking started',
+      );
       this.emitter.emit('event', {
         type: 'speech.started',
         sessionId,
@@ -398,11 +429,43 @@ export class DiscordGatewayVoiceTransport {
     });
 
     connection.receiver.speaking.on('end', (userId) => {
-      this.emitter.emit('event', {
-        type: 'speech.stopped',
-        sessionId,
-        participantId: userId,
-      } satisfies VoiceEvent);
+      const existingTimer = active.pendingSpeechStopTimers.get(userId);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+
+      logger.debug(
+        {
+          sessionId,
+          userId,
+          subscribedUsers: active.subscribedUsers.size,
+          outputChunkCount: active.outputChunkCount,
+          bufferedOutputBytes: active.outputStream.writableLength,
+          debounceMs: DISCORD_SPEECH_STOP_DEBOUNCE_MS,
+        },
+        'Discord receiver speaking ended, scheduling debounced stop',
+      );
+
+      const timer = setTimeout(() => {
+        active.pendingSpeechStopTimers.delete(userId);
+        logger.debug(
+          {
+            sessionId,
+            userId,
+            subscribedUsers: active.subscribedUsers.size,
+            outputChunkCount: active.outputChunkCount,
+            bufferedOutputBytes: active.outputStream.writableLength,
+          },
+          'Discord receiver speaking ended',
+        );
+        this.emitter.emit('event', {
+          type: 'speech.stopped',
+          sessionId,
+          participantId: userId,
+        } satisfies VoiceEvent);
+      }, DISCORD_SPEECH_STOP_DEBOUNCE_MS);
+      timer.unref?.();
+      active.pendingSpeechStopTimers.set(userId, timer);
     });
 
     connection.on(VoiceConnectionStatus.Disconnected, () => {
@@ -468,6 +531,7 @@ export class DiscordGatewayVoiceTransport {
     session.outputStream.end();
     session.player.stop();
     session.connection.destroy();
+    this.clearPendingSpeechStopTimers(session);
     this.sessions.delete(sessionId);
     this.emitter.emit('event', {
       type: 'session.ended',
@@ -533,6 +597,28 @@ export class DiscordGatewayVoiceTransport {
   }
 
   async interruptOutput(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      logger.warn(
+        { sessionId },
+        'Attempted to interrupt output for unknown Discord session',
+      );
+      return;
+    }
+
+    if (
+      !hasInterruptibleDiscordOutputForTest({
+        outputChunkCount: session.outputChunkCount,
+        bufferedBytes: session.outputStream.writableLength,
+      })
+    ) {
+      logger.debug(
+        { sessionId },
+        'Skipping Discord voice interrupt; no queued output',
+      );
+      return;
+    }
+
     logger.debug({ sessionId }, 'Interrupting Discord voice output');
     this.resetOutputStream(sessionId, 'interrupt');
   }
@@ -628,7 +714,7 @@ export class DiscordGatewayVoiceTransport {
     const opusStream = session.connection.receiver.subscribe(userId, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: 100,
+        duration: DISCORD_USER_AUDIO_END_SILENCE_MS,
       },
     });
     const decoder = new prism.opus.Decoder({
@@ -651,19 +737,41 @@ export class DiscordGatewayVoiceTransport {
     let cleanedUp = false;
     const cleanup = () => {
       if (cleanedUp) {
+        logger.debug(
+          { sessionId: session.sessionId, userId },
+          'Discord user audio cleanup already completed',
+        );
         return;
       }
       cleanedUp = true;
       logger.debug(
-        { sessionId: session.sessionId, userId },
+        {
+          sessionId: session.sessionId,
+          userId,
+          subscribedUsersBeforeDelete: session.subscribedUsers.size,
+          outputChunkCount: session.outputChunkCount,
+          bufferedOutputBytes: session.outputStream.writableLength,
+        },
         'Cleaning up Discord user audio subscription',
       );
       session.subscribedUsers.delete(userId);
       decoder.removeAllListeners();
     };
 
-    opusStream.once('end', cleanup);
-    opusStream.once('close', cleanup);
+    opusStream.once('end', () => {
+      logger.debug(
+        { sessionId: session.sessionId, userId },
+        'Discord user audio opus stream ended',
+      );
+      cleanup();
+    });
+    opusStream.once('close', () => {
+      logger.debug(
+        { sessionId: session.sessionId, userId },
+        'Discord user audio opus stream closed',
+      );
+      cleanup();
+    });
     opusStream.once('error', (err) => {
       logger.warn(
         { err, sessionId: session.sessionId, userId },
@@ -754,6 +862,7 @@ export class DiscordGatewayVoiceTransport {
 
     session.outputStream.end();
     session.player.stop();
+    this.clearPendingSpeechStopTimers(session);
     this.sessions.delete(sessionId);
     this.emitter.emit('event', {
       type: 'session.ended',
@@ -793,10 +902,16 @@ export class DiscordGatewayVoiceTransport {
       inlineVolume: false,
     });
     session.player.play(session.outputResource);
-    session.connection.subscribe(session.player);
     session.outputChunkCount = 0;
     session.outputBytesQueued = 0;
     session.lastOutputChunkAtMs = undefined;
+  }
+
+  private clearPendingSpeechStopTimers(session: ActiveDiscordSession): void {
+    for (const timer of session.pendingSpeechStopTimers.values()) {
+      clearTimeout(timer);
+    }
+    session.pendingSpeechStopTimers.clear();
   }
 }
 

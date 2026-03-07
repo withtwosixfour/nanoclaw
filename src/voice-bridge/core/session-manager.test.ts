@@ -152,6 +152,64 @@ describe('VoiceBridgeSessionManager', () => {
     });
   });
 
+  it('accepts adapter audio while realtime is still connecting', async () => {
+    const adapter = new FakeAdapter();
+    const realtime = new FakeRealtimeSession();
+    let resolveConnect: (() => void) | undefined;
+    realtime.connect = vi.fn(
+      async () =>
+        await new Promise<undefined>((resolve) => {
+          resolveConnect = () => resolve(undefined);
+        }),
+    );
+
+    const { VoiceBridgeSessionManager } = await import('./session-manager.js');
+    const manager = new VoiceBridgeSessionManager(
+      {
+        sendMessage: async () => undefined,
+        schedulerDeps: {
+          agents: async () => ({}),
+          getSessions: async () => ({}),
+          runAgent: async () => ({ status: 'success', result: 'ok' }),
+          sendMessage: async () => undefined,
+        },
+      },
+      {
+        create: () => realtime as any,
+      },
+    );
+    manager.registerAdapter(adapter as any);
+
+    const startPromise = manager.startSession({
+      platform: 'discord',
+      mode: 'direct',
+      targetId: 'user-1',
+      routeKey: 'voice:discord:dm:user-1',
+    });
+
+    await vi.waitFor(() => {
+      expect(realtime.connect).toHaveBeenCalled();
+    });
+
+    adapter.emit('event', {
+      type: 'audio.input',
+      sessionId: 'platform-session-1',
+      participantId: 'user-1',
+      pcm16: Buffer.from('abc'),
+      sampleRate: 24000,
+    });
+
+    await vi.waitFor(() => {
+      expect(realtime.appendInputAudio).toHaveBeenCalledWith(
+        Buffer.from('abc'),
+        24000,
+      );
+    });
+
+    resolveConnect?.();
+    await startPromise;
+  });
+
   it('leaves the call when the realtime model requests it', async () => {
     executeTool.mockResolvedValueOnce({
       ok: true,
@@ -201,5 +259,60 @@ describe('VoiceBridgeSessionManager', () => {
       expect(realtime.close).toHaveBeenCalled();
       expect(adapter.stopSession).toHaveBeenCalledWith('platform-session-1');
     });
+  });
+
+  it('ignores rapid speech restarts when no model response is active', async () => {
+    vi.useFakeTimers();
+
+    try {
+      const adapter = new FakeAdapter();
+      const realtime = new FakeRealtimeSession();
+      const { VoiceBridgeSessionManager } =
+        await import('./session-manager.js');
+      const manager = new VoiceBridgeSessionManager(
+        {
+          sendMessage: async () => undefined,
+          schedulerDeps: {
+            agents: async () => ({}),
+            getSessions: async () => ({}),
+            runAgent: async () => ({ status: 'success', result: 'ok' }),
+            sendMessage: async () => undefined,
+          },
+        },
+        {
+          create: () => realtime as any,
+        },
+      );
+      manager.registerAdapter(adapter as any);
+
+      await manager.startSession({
+        platform: 'discord',
+        mode: 'direct',
+        targetId: 'user-1',
+        routeKey: 'voice:discord:dm:user-1',
+      });
+
+      adapter.emit('event', {
+        type: 'speech.stopped',
+        sessionId: 'platform-session-1',
+        participantId: 'user-1',
+      });
+
+      vi.advanceTimersByTime(10);
+
+      adapter.emit('event', {
+        type: 'speech.started',
+        sessionId: 'platform-session-1',
+        participantId: 'user-1',
+      });
+
+      vi.advanceTimersByTime(400);
+      await vi.runAllTimersAsync();
+
+      expect(adapter.interruptOutput).not.toHaveBeenCalled();
+      expect(realtime.interrupt).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
