@@ -1,8 +1,10 @@
-import fs from 'fs';
+import { promises as fs } from 'fs';
 import path from 'path';
 import { z } from 'zod';
 
 const POLICY_RELATIVE_PATH = path.join('.nanoclaw', 'bash-policy.json');
+const MAX_POLICY_CACHE = 256;
+const MAX_PATTERN_LENGTH = 256;
 
 const argRuleSchema = z
   .object({
@@ -89,6 +91,289 @@ function normalizeCommandName(input: string): string {
   return path.basename(input).toLowerCase();
 }
 
+function touchPolicyCache(policyPath: string, entry: PolicyCacheEntry): void {
+  if (policyCache.has(policyPath)) {
+    policyCache.delete(policyPath);
+  }
+
+  policyCache.set(policyPath, entry);
+
+  if (policyCache.size > MAX_POLICY_CACHE) {
+    const oldestKey = policyCache.keys().next().value;
+    if (oldestKey) {
+      policyCache.delete(oldestKey);
+    }
+  }
+}
+
+function isSafeRegexPattern(pattern: string): boolean {
+  if (pattern.length === 0 || pattern.length > MAX_PATTERN_LENGTH) {
+    return false;
+  }
+
+  if (/\\[1-9]/.test(pattern)) {
+    return false;
+  }
+
+  if (/\(\?<(?!!|=)/.test(pattern) || /\(\?(?:=|!|<=|<!)|\(\?>/.test(pattern)) {
+    return false;
+  }
+
+  if (/\((?:[^()\\]|\\.)*[+*{](?:[^()\\]|\\.)*\)(?:[+*]|\{)/.test(pattern)) {
+    return false;
+  }
+
+  return true;
+}
+
+function findClosingBacktick(input: string, startIndex: number): number {
+  let escaping = false;
+
+  for (let i = startIndex + 1; i < input.length; i++) {
+    const char = input[i];
+
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaping = true;
+      continue;
+    }
+
+    if (char === '`') {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+function findClosingParen(input: string, openIndex: number): number {
+  let depth = 1;
+  let inSingle = false;
+  let inDouble = false;
+  let escaping = false;
+
+  for (let i = openIndex + 1; i < input.length; i++) {
+    const char = input[i];
+    const next = input[i + 1] || '';
+
+    if (inSingle) {
+      if (char === "'") {
+        inSingle = false;
+      }
+      continue;
+    }
+
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaping = true;
+      continue;
+    }
+
+    if (inDouble) {
+      if (char === '"') {
+        inDouble = false;
+        continue;
+      }
+
+      if (char === '`') {
+        const closingBacktick = findClosingBacktick(input, i);
+        if (closingBacktick === -1) {
+          return -1;
+        }
+        i = closingBacktick;
+        continue;
+      }
+
+      if (char === '$' && next === '(') {
+        const closingParen = findClosingParen(input, i + 1);
+        if (closingParen === -1) {
+          return -1;
+        }
+        i = closingParen;
+      }
+
+      continue;
+    }
+
+    if (char === "'") {
+      inSingle = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inDouble = true;
+      continue;
+    }
+
+    if (char === '`') {
+      const closingBacktick = findClosingBacktick(input, i);
+      if (closingBacktick === -1) {
+        return -1;
+      }
+      i = closingBacktick;
+      continue;
+    }
+
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+
+    if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
+interface ShellSyntax {
+  segments: string[];
+  operators: Set<string>;
+}
+
+function collectShellSyntax(
+  command: string,
+  syntax?: ShellSyntax,
+): ShellSyntax {
+  const result = syntax ?? { segments: [], operators: new Set<string>() };
+  let current = '';
+  let inSingle = false;
+  let inDouble = false;
+  let escaping = false;
+
+  const pushCurrent = () => {
+    const trimmed = current.trim();
+    if (trimmed) {
+      result.segments.push(trimmed);
+    }
+    current = '';
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    const next = command[i + 1] || '';
+
+    if (inSingle) {
+      current += char;
+      if (char === "'") {
+        inSingle = false;
+      }
+      continue;
+    }
+
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      current += char;
+      escaping = true;
+      continue;
+    }
+
+    if (inDouble) {
+      if (char === '"') {
+        inDouble = false;
+        current += char;
+        continue;
+      }
+
+      if (char === '`') {
+        const closingBacktick = findClosingBacktick(command, i);
+        if (closingBacktick !== -1) {
+          collectShellSyntax(command.slice(i + 1, closingBacktick), result);
+          i = closingBacktick;
+          continue;
+        }
+      }
+
+      if (char === '$' && next === '(') {
+        const closingParen = findClosingParen(command, i + 1);
+        if (closingParen !== -1) {
+          collectShellSyntax(command.slice(i + 2, closingParen), result);
+          i = closingParen;
+          continue;
+        }
+      }
+
+      current += char;
+      continue;
+    }
+
+    if (char === "'") {
+      inSingle = true;
+      current += char;
+      continue;
+    }
+
+    if (char === '"') {
+      inDouble = true;
+      current += char;
+      continue;
+    }
+
+    if (char === '`') {
+      const closingBacktick = findClosingBacktick(command, i);
+      if (closingBacktick !== -1) {
+        collectShellSyntax(command.slice(i + 1, closingBacktick), result);
+        i = closingBacktick;
+        continue;
+      }
+    }
+
+    if (char === '$' && next === '(') {
+      const closingParen = findClosingParen(command, i + 1);
+      if (closingParen !== -1) {
+        collectShellSyntax(command.slice(i + 2, closingParen), result);
+        i = closingParen;
+        continue;
+      }
+    }
+
+    if (char === '(') {
+      const closingParen = findClosingParen(command, i);
+      if (closingParen !== -1) {
+        collectShellSyntax(command.slice(i + 1, closingParen), result);
+        i = closingParen;
+        continue;
+      }
+    }
+
+    const two = `${char}${next}`;
+    if (two === '&&' || two === '||') {
+      pushCurrent();
+      result.operators.add(two);
+      i += 1;
+      continue;
+    }
+
+    if (char === '|' || char === ';' || char === '&' || char === '\n') {
+      pushCurrent();
+      result.operators.add(char);
+      continue;
+    }
+
+    current += char;
+  }
+
+  pushCurrent();
+  return result;
+}
+
 function tokenizeCommand(segment: string): string[] {
   const tokens: string[] = [];
   let current = '';
@@ -139,103 +424,7 @@ function tokenizeCommand(segment: string): string[] {
 }
 
 function splitSimpleCommands(command: string): string[] {
-  const commands: string[] = [];
-  let current = '';
-  let inSingle = false;
-  let inDouble = false;
-  let inBacktick = false;
-  let escaping = false;
-  let subshellDepth = 0;
-
-  for (let i = 0; i < command.length; i++) {
-    const char = command[i];
-    const next = command[i + 1] || '';
-
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
-
-    if (char === '\\' && !inSingle && !inBacktick) {
-      current += char;
-      escaping = true;
-      continue;
-    }
-
-    if (char === "'" && !inDouble && !inBacktick) {
-      inSingle = !inSingle;
-      current += char;
-      continue;
-    }
-
-    if (char === '"' && !inSingle && !inBacktick) {
-      inDouble = !inDouble;
-      current += char;
-      continue;
-    }
-
-    if (char === '`' && !inSingle && !inDouble) {
-      inBacktick = !inBacktick;
-      current += char;
-      continue;
-    }
-
-    if (!inSingle && !inDouble && !inBacktick) {
-      if (char === '$' && next === '(') {
-        subshellDepth += 1;
-      } else if (char === '(' && subshellDepth === 0) {
-        // Bare ( starts a subshell
-        subshellDepth += 1;
-      } else if (char === ')' && subshellDepth > 0) {
-        subshellDepth -= 1;
-      }
-
-      if (subshellDepth === 0) {
-        const two = `${char}${next}`;
-        if (two === '&&' || two === '||') {
-          if (current.trim()) {
-            commands.push(current.trim());
-          }
-          current = '';
-          i += 1;
-          continue;
-        }
-
-        if (char === ';' || char === '|' || char === '&' || char === '\n') {
-          if (current.trim()) {
-            commands.push(current.trim());
-          }
-          current = '';
-          continue;
-        }
-      }
-    }
-
-    current += char;
-  }
-
-  if (current.trim()) {
-    commands.push(current.trim());
-  }
-
-  return commands;
-}
-
-function stripSubshellParens(input: string): string {
-  // Remove leading ( for bare subshell commands like (rm ...)
-  if (input.startsWith('(')) {
-    return input.slice(1).trim();
-  }
-  return input;
-}
-
-function stripBackticks(input: string): string {
-  // Remove leading backtick (the closing backtick is typically part of the last arg)
-  if (input.startsWith('`')) {
-    return input.slice(1).trim();
-  }
-  return input;
+  return collectShellSyntax(command).segments;
 }
 
 const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
@@ -278,10 +467,6 @@ export function parseCommandSegments(command: string): ParsedCommand[] {
       commandName = tokens[i];
     }
 
-    // Strip subshell parens and backticks from command name
-    commandName = stripSubshellParens(commandName);
-    commandName = stripBackticks(commandName);
-
     parsed.push({
       raw: segment,
       command: normalizeCommandName(commandName),
@@ -295,8 +480,19 @@ export function parseCommandSegments(command: string): ParsedCommand[] {
 function compileArgRule(command: string, rule: ArgRuleConfig): ArgRule {
   const denyPatterns = (rule.denyPatterns || []).map((pattern: string) => {
     try {
+      if (!isSafeRegexPattern(pattern)) {
+        throw new Error(
+          `Unsafe deny pattern for command "${command}": ${pattern}`,
+        );
+      }
       return new RegExp(pattern);
-    } catch {
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message.startsWith('Unsafe deny pattern')
+      ) {
+        throw err;
+      }
       throw new Error(
         `Invalid deny pattern for command "${command}": ${pattern}`,
       );
@@ -345,20 +541,36 @@ function compilePolicy(
   };
 }
 
-export function loadBashPolicy(agentDir: string): BashPolicyLoadResult {
+export async function loadBashPolicy(
+  agentDir: string,
+): Promise<BashPolicyLoadResult> {
   const policyPath = path.join(agentDir, POLICY_RELATIVE_PATH);
-  if (!fs.existsSync(policyPath)) {
-    return { ok: true, found: false };
+
+  let stats;
+
+  try {
+    stats = await fs.stat(policyPath);
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code === 'ENOENT') {
+      return { ok: true, found: false };
+    }
+
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `Failed to stat bash policy at ${policyPath}: ${message}`,
+    };
   }
 
   try {
-    const stats = fs.statSync(policyPath);
     const cached = policyCache.get(policyPath);
     if (cached && cached.mtimeMs === stats.mtimeMs) {
+      touchPolicyCache(policyPath, cached);
       return { ok: true, found: true, policy: cached.policy };
     }
 
-    const raw = fs.readFileSync(policyPath, 'utf-8');
+    const raw = await fs.readFile(policyPath, 'utf-8');
     const json = JSON.parse(raw);
     const parsed = bashPolicySchema.safeParse(json);
     if (!parsed.success) {
@@ -369,7 +581,7 @@ export function loadBashPolicy(agentDir: string): BashPolicyLoadResult {
     }
 
     const policy = compilePolicy(parsed.data, policyPath);
-    policyCache.set(policyPath, { mtimeMs: stats.mtimeMs, policy });
+    touchPolicyCache(policyPath, { mtimeMs: stats.mtimeMs, policy });
     return { ok: true, found: true, policy };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -388,26 +600,9 @@ function hasDeniedOperator(
     return false;
   }
 
-  if (denyOperators.has('&&') && rawCommand.includes('&&')) {
-    return true;
-  }
-  if (denyOperators.has('||') && rawCommand.includes('||')) {
-    return true;
-  }
-  // Check for lone |, but not || (already checked above)
-  if (denyOperators.has('|')) {
-    // Must check for || first, then for lone |
-    const withoutOr = rawCommand.replace(/\|\|/g, '');
-    if (withoutOr.includes('|')) {
-      return true;
-    }
-  }
-  if (denyOperators.has(';') && rawCommand.includes(';')) {
-    return true;
-  }
-  if (denyOperators.has('&')) {
-    const stripped = rawCommand.replace(/&&/g, '');
-    if (stripped.includes('&')) {
+  const operators = collectShellSyntax(rawCommand).operators;
+  for (const operator of denyOperators) {
+    if (operators.has(operator)) {
       return true;
     }
   }
@@ -497,6 +692,7 @@ export function evaluateBashCommandPolicy(
     }
 
     for (const denyPattern of argRule.denyPatterns) {
+      denyPattern.lastIndex = 0;
       if (denyPattern.test(segment.raw)) {
         return {
           allowed: false,

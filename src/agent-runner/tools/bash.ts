@@ -42,7 +42,7 @@ export function createBashTool(ctx: WorkspaceContext) {
     }) => {
       const { command, workdir, timeout } = input;
 
-      const policyResult = loadBashPolicy(ctx.agentDir);
+      const policyResult = await loadBashPolicy(ctx.agentDir);
       if (!policyResult.ok) {
         return { stdout: '', stderr: policyResult.error, exitCode: 1 };
       }
