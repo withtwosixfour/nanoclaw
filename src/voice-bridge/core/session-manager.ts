@@ -13,7 +13,11 @@ import {
   estimatePcmDurationMs,
   voiceStreamDiagnosticsEnabled,
 } from '../diagnostics.js';
-import { createRealtimeToolBridge } from '../realtime/nanoclaw-tools.js';
+import {
+  createRealtimeToolBridge,
+  type DelegatedTaskUpdate,
+  isLeaveCallToolResult,
+} from '../realtime/nanoclaw-tools.js';
 import {
   RealtimeSessionFactory,
   VoiceBridgeDependencies,
@@ -53,6 +57,10 @@ interface OutputDispatchDiagnostics {
 }
 
 export class VoiceBridgeSessionManager {
+  private static readonly SPEECH_INTERRUPT_DEBOUNCE_MS = 250;
+
+  private static readonly SPEECH_RESTART_GRACE_MS = 300;
+
   private readonly emitter = new EventEmitter();
 
   private readonly adapters = new Map<VoicePlatform, VoicePlatformAdapter>();
@@ -69,8 +77,6 @@ export class VoiceBridgeSessionManager {
     string,
     OutputDispatchDiagnostics
   >();
-
-  private static readonly SPEECH_INTERRUPT_DEBOUNCE_MS = 250;
 
   constructor(
     private readonly deps: VoiceBridgeDependencies,
@@ -248,9 +254,13 @@ export class VoiceBridgeSessionManager {
       isMain: Boolean(input.agent.isMain),
       routeKey: record.routeKey,
       linkedTextThreadId: record.linkedTextThreadId,
+      linkedTextSessionId: record.linkedTextSessionId,
       deps: {
         sendMessage: this.deps.sendMessage,
         schedulerDeps: this.deps.schedulerDeps,
+      },
+      onDelegatedTaskUpdate: async (update) => {
+        await this.handleDelegatedTaskUpdate(record.voiceSessionId, update);
       },
     });
 
@@ -267,15 +277,39 @@ export class VoiceBridgeSessionManager {
       tools: toolBridge.definitions,
     };
 
-    await realtime.connect(params);
-
-    logger.info(params, 'Realtime voice session connected');
-
     this.activeSessions.set(voiceSessionId, {
       record,
       adapter: input.adapter,
       realtime,
     });
+
+    try {
+      await realtime.connect(params);
+    } catch (err) {
+      this.activeSessions.delete(voiceSessionId);
+      this.clearSessionSpeechState(voiceSessionId);
+      this.lastSpeechStoppedAtMs.delete(voiceSessionId);
+      this.activeResponseBySession.delete(voiceSessionId);
+      this.outputDiagnosticsBySession.delete(voiceSessionId);
+      markVoiceSessionEnded(voiceSessionId, 'failed');
+
+      try {
+        await input.adapter.stopSession(input.platformSessionId);
+      } catch (stopErr) {
+        logger.warn(
+          {
+            err: stopErr,
+            voiceSessionId,
+            platformSessionId: input.platformSessionId,
+          },
+          'Failed to stop Discord session after realtime connect failure',
+        );
+      }
+
+      throw err;
+    }
+
+    logger.info(params, 'Realtime voice session connected');
 
     this.emitter.emit('event', {
       type: 'voice.session.started',
@@ -341,6 +375,34 @@ export class VoiceBridgeSessionManager {
         await active.realtime.appendInputAudio(event.pcm16, event.sampleRate);
         break;
       case 'speech.started':
+        const lastStoppedAt = this.lastSpeechStoppedAtMs.get(
+          active.record.voiceSessionId,
+        );
+        const msSinceLastStop =
+          typeof lastStoppedAt === 'number'
+            ? Date.now() - lastStoppedAt
+            : undefined;
+        const activeResponse =
+          this.activeResponseBySession.get(active.record.voiceSessionId) ??
+          false;
+
+        if (
+          !activeResponse &&
+          typeof msSinceLastStop === 'number' &&
+          msSinceLastStop < VoiceBridgeSessionManager.SPEECH_RESTART_GRACE_MS
+        ) {
+          logger.debug(
+            {
+              voiceSessionId: active.record.voiceSessionId,
+              participantId: event.participantId,
+              msSinceLastStop,
+              graceMs: VoiceBridgeSessionManager.SPEECH_RESTART_GRACE_MS,
+            },
+            'Ignoring rapid speech restart during no-response grace window',
+          );
+          break;
+        }
+
         this.scheduleSpeechInterrupt(
           active.record.voiceSessionId,
           event.participantId,
@@ -349,12 +411,19 @@ export class VoiceBridgeSessionManager {
           {
             voiceSessionId: active.record.voiceSessionId,
             participantId: event.participantId,
+            msSinceLastStop,
             debounceMs: VoiceBridgeSessionManager.SPEECH_INTERRUPT_DEBOUNCE_MS,
           },
           'User speech started; scheduling assistant interruption',
         );
         break;
       case 'speech.stopped':
+        const interruptKey = this.speechInterruptKey(
+          active.record.voiceSessionId,
+          event.participantId,
+        );
+        const hadPendingInterrupt =
+          this.pendingSpeechInterrupts.has(interruptKey);
         this.clearPendingSpeechInterrupt(
           active.record.voiceSessionId,
           event.participantId,
@@ -367,6 +436,10 @@ export class VoiceBridgeSessionManager {
           {
             voiceSessionId: active.record.voiceSessionId,
             participantId: event.participantId,
+            hadPendingInterrupt,
+            activeResponse:
+              this.activeResponseBySession.get(active.record.voiceSessionId) ??
+              false,
           },
           'User speech stopped',
         );
@@ -526,6 +599,13 @@ export class VoiceBridgeSessionManager {
             event.arguments,
           );
           await active.realtime.sendToolResult(event.callId, result);
+          if (isLeaveCallToolResult(result)) {
+            logger.info(
+              { voiceSessionId, callId: event.callId },
+              'Realtime model requested call leave',
+            );
+            await this.stopSession(voiceSessionId);
+          }
         } catch (err) {
           logger.error(
             {
@@ -588,8 +668,8 @@ export class VoiceBridgeSessionManager {
         this.clearSessionSpeechState(voiceSessionId);
         this.lastSpeechStoppedAtMs.delete(voiceSessionId);
         this.activeResponseBySession.delete(voiceSessionId);
-        this.activeSessions.delete(voiceSessionId);
         this.outputDiagnosticsBySession.delete(voiceSessionId);
+        this.activeSessions.delete(voiceSessionId);
         break;
       case 'session.closed':
         logger.info({ voiceSessionId }, 'Realtime voice session closed');
@@ -603,6 +683,42 @@ export class VoiceBridgeSessionManager {
       default:
         break;
     }
+  }
+
+  private async handleDelegatedTaskUpdate(
+    voiceSessionId: string,
+    update: DelegatedTaskUpdate,
+  ): Promise<void> {
+    const active = this.activeSessions.get(voiceSessionId);
+    if (!active) {
+      logger.debug(
+        { voiceSessionId, taskId: update.taskId, status: update.status },
+        'Skipping delegated task update for inactive voice session',
+      );
+      return;
+    }
+
+    logger.info(
+      {
+        voiceSessionId,
+        taskId: update.taskId,
+        agentId: update.agentId,
+        status: update.status,
+        announce: update.announce,
+      },
+      'Injecting delegated task update into realtime session',
+    );
+
+    appendVoiceTranscript({
+      voiceSessionId,
+      role: 'system',
+      content: update.message,
+      createdAt: new Date().toISOString(),
+    });
+
+    await active.realtime.addMessage('system', update.message, {
+      triggerResponse: update.announce,
+    });
   }
 
   private scheduleSpeechInterrupt(
@@ -625,8 +741,16 @@ export class VoiceBridgeSessionManager {
     const key = this.speechInterruptKey(voiceSessionId, participantId);
     const timer = this.pendingSpeechInterrupts.get(key);
     if (!timer) {
+      logger.debug(
+        { voiceSessionId, participantId },
+        'No pending speech interrupt timer to clear',
+      );
       return;
     }
+    logger.debug(
+      { voiceSessionId, participantId },
+      'Clearing pending speech interrupt timer',
+    );
     clearTimeout(timer);
     this.pendingSpeechInterrupts.delete(key);
   }
@@ -650,6 +774,10 @@ export class VoiceBridgeSessionManager {
 
     const active = this.activeSessions.get(voiceSessionId);
     if (!active) {
+      logger.debug(
+        { voiceSessionId, participantId },
+        'Skipping speech interrupt; voice session is no longer active',
+      );
       return;
     }
 

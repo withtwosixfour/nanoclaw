@@ -164,6 +164,11 @@ export interface RealtimeSession {
   appendInputAudio(pcm16: Buffer, sampleRate: number): Promise<void>;
   interrupt(): Promise<void>;
   sendToolResult(callId: string, result: unknown): Promise<void>;
+  addMessage(
+    role: 'system' | 'user' | 'assistant',
+    text: string,
+    options?: { triggerResponse?: boolean },
+  ): Promise<void>;
   close(): Promise<void>;
   onEvent(handler: (event: RealtimeEvent) => void): void;
 }

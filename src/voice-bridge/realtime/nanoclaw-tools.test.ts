@@ -1,50 +1,90 @@
-import { z } from 'zod';
 import { describe, expect, it, vi } from 'vitest';
 
-const sendMessageToolExecute = vi.fn(async (args: { text: string }) => ({
-  ok: true,
-  text: args.text,
+const { saveMessage } = vi.hoisted(() => ({
+  saveMessage: vi.fn(async () => undefined),
 }));
 
-vi.mock('../../agent-runner/tool-registry.js', () => ({
-  createBaseTools: vi.fn(() => ({
-    send_message: {
-      description: 'Send message',
-      inputSchema: z.object({ text: z.string() }),
-      execute: sendMessageToolExecute,
-    },
-  })),
+vi.mock('../../agent-runner/session-store.js', () => ({
+  saveMessage,
 }));
 
 import { createRealtimeToolBridge } from './nanoclaw-tools.js';
 
 describe('realtime tool bridge', () => {
   it('exposes tool definitions and delegates execution', async () => {
-    const sendMessage = vi.fn();
+    const runAgent = vi.fn(async () => ({
+      status: 'success' as const,
+      result: 'Background answer',
+    }));
+    const onDelegatedTaskUpdate = vi.fn(async () => undefined);
     const bridge = createRealtimeToolBridge({
       agentId: 'main',
       isMain: true,
       routeKey: 'voice:discord:dm:user-1',
       linkedTextThreadId: 'discord:guild-1:thread-1',
+      linkedTextSessionId: 'session-1',
       deps: {
-        sendMessage,
+        sendMessage: async () => undefined,
         schedulerDeps: {
-          agents: async () => ({}),
+          agents: async () => ({
+            main: {
+              id: 'main',
+              folder: 'main',
+              name: 'Main',
+              trigger: '@main',
+              added_at: new Date().toISOString(),
+              isMain: true,
+            },
+          }),
           getSessions: async () => ({}),
-          runAgent: async () => ({ status: 'success', result: 'ok' }),
+          runAgent,
           sendMessage: async () => undefined,
         },
       },
+      onDelegatedTaskUpdate,
     });
 
-    expect(
-      bridge.definitions.some((tool) => tool.name === 'send_message'),
-    ).toBe(true);
+    expect(bridge.definitions).toEqual([
+      expect.objectContaining({ name: 'delegate_to_agent' }),
+      expect.objectContaining({ name: 'leave_call' }),
+    ]);
 
-    await bridge.execute('send_message', { text: 'hello from voice' });
-    expect(sendMessageToolExecute).toHaveBeenCalledWith({
-      text: 'hello from voice',
+    await expect(bridge.execute('leave_call', {})).resolves.toMatchObject({
+      ok: true,
+      leaveCall: true,
+      message: expect.stringContaining('Leaving the call'),
     });
-    expect(sendMessage).not.toHaveBeenCalled();
+
+    const result = await bridge.execute('delegate_to_agent', {
+      agent_id: 'main',
+      prompt: 'Research this for me',
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      status: 'running',
+      agentId: 'main',
+    });
+
+    await vi.waitFor(() => {
+      expect(runAgent).toHaveBeenCalled();
+      expect(saveMessage).toHaveBeenCalledWith(
+        'discord:guild-1:thread-1',
+        'main',
+        'session-1',
+        {
+          role: 'system',
+          content: expect.stringContaining('Background answer'),
+        },
+        null,
+      );
+      expect(onDelegatedTaskUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentId: 'main',
+          status: 'completed',
+          message: expect.stringContaining('Background answer'),
+        }),
+      );
+    });
   });
 });

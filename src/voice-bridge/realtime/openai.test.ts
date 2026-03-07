@@ -88,4 +88,27 @@ describe('OpenAI realtime session wrapper', () => {
     expect(socket.sent[1]).toContain('function_call_output');
     expect(socket.sent[2]).toContain('response.create');
   });
+
+  it('can inject a message back into realtime context', async () => {
+    const socket = new FakeSocket();
+    const factory = new OpenAIRealtimeSessionFactory(() => socket as any);
+    const session = factory.create('voice-1');
+
+    const connectPromise = session.connect({
+      sessionId: 'voice-1',
+      model: 'gpt-realtime',
+      instructions: 'Speak helpfully',
+      tools: [],
+    });
+    socket.emit('open');
+    await connectPromise;
+
+    await session.addMessage('system', 'Background task completed.', {
+      triggerResponse: true,
+    });
+
+    expect(socket.sent[1]).toContain('conversation.item.create');
+    expect(socket.sent[1]).toContain('Background task completed.');
+    expect(socket.sent[2]).toContain('response.create');
+  });
 });

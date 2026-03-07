@@ -192,6 +192,42 @@ class OpenAIRealtimeSession implements RealtimeSession {
     this.socket!.send(JSON.stringify({ type: 'response.create' }));
   }
 
+  async addMessage(
+    role: 'system' | 'user' | 'assistant',
+    text: string,
+    options?: { triggerResponse?: boolean },
+  ): Promise<void> {
+    this.assertSocket();
+    logger.debug(
+      {
+        sessionId: this.sessionId,
+        role,
+        triggerResponse: options?.triggerResponse,
+      },
+      'Adding realtime conversation message',
+    );
+
+    this.socket!.send(
+      JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role,
+          content: [
+            {
+              type: role === 'assistant' ? 'output_text' : 'input_text',
+              text,
+            },
+          ],
+        },
+      }),
+    );
+
+    if (options?.triggerResponse) {
+      this.socket!.send(JSON.stringify({ type: 'response.create' }));
+    }
+  }
+
   async close(): Promise<void> {
     logger.info(
       { sessionId: this.sessionId },

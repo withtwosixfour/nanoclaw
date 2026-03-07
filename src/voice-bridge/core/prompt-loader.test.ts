@@ -17,6 +17,8 @@ describe('voice prompt loader', () => {
     expect(prompt).toContain('Agent prompt');
     expect(prompt).toContain('Global prompt');
     expect(prompt).toContain('live voice conversation');
+    expect(prompt).toContain('delegate_to_agent');
+    expect(prompt).toContain('leave_call');
     expect(prompt).toContain('voice:discord:dm:user-1');
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  hasInterruptibleDiscordOutputForTest,
   pcmMonoToDiscordStereo48kForTest,
   pcmStereo48kToMono24kForTest,
 } from './adapters/discord.js';
@@ -36,5 +37,28 @@ describe('discord voice audio conversion', () => {
     expect(out.length).toBe(4);
     expect(out.readInt16LE(0)).toBe(1000);
     expect(out.readInt16LE(2)).toBe(-1000);
+  });
+
+  it('only treats discord output as interruptible when audio exists', () => {
+    expect(
+      hasInterruptibleDiscordOutputForTest({
+        outputChunkCount: 0,
+        bufferedBytes: 0,
+      }),
+    ).toBe(false);
+
+    expect(
+      hasInterruptibleDiscordOutputForTest({
+        outputChunkCount: 1,
+        bufferedBytes: 0,
+      }),
+    ).toBe(true);
+
+    expect(
+      hasInterruptibleDiscordOutputForTest({
+        outputChunkCount: 0,
+        bufferedBytes: 128,
+      }),
+    ).toBe(true);
   });
 });
