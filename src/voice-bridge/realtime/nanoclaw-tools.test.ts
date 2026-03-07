@@ -45,9 +45,22 @@ describe('realtime tool bridge', () => {
     });
 
     expect(bridge.definitions).toEqual([
+      expect.objectContaining({ name: 'list_agents' }),
       expect.objectContaining({ name: 'delegate_to_agent' }),
       expect.objectContaining({ name: 'leave_call' }),
     ]);
+
+    await expect(bridge.execute('list_agents', {})).resolves.toMatchObject({
+      ok: true,
+      agents: [
+        expect.objectContaining({
+          id: 'main',
+          name: 'Main',
+          trigger: '@main',
+          isMain: true,
+        }),
+      ],
+    });
 
     await expect(bridge.execute('leave_call', {})).resolves.toMatchObject({
       ok: true,

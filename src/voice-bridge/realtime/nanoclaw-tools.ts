@@ -37,6 +37,16 @@ export interface LeaveCallToolResult {
   message: string;
 }
 
+export interface ListAgentsToolResult {
+  ok: true;
+  agents: Array<{
+    id: string;
+    name: string;
+    trigger: string;
+    isMain: boolean;
+  }>;
+}
+
 export function isLeaveCallToolResult(
   value: unknown,
 ): value is LeaveCallToolResult {
@@ -132,6 +142,15 @@ export function createRealtimeToolBridge(input: {
 
   const definitions = [
     {
+      name: 'list_agents',
+      description: 'List the available agents you can delegate work to.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
       name: 'delegate_to_agent',
       description:
         'Delegate a background task to another agent and return immediately so the realtime conversation can continue.',
@@ -152,6 +171,20 @@ export function createRealtimeToolBridge(input: {
   return {
     definitions,
     execute: async (name, args) => {
+      if (name === 'list_agents') {
+        void args;
+        const agents = await input.deps.schedulerDeps.agents();
+        return {
+          ok: true,
+          agents: Object.values(agents).map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            trigger: agent.trigger,
+            isMain: agent.isMain ?? false,
+          })),
+        } satisfies ListAgentsToolResult;
+      }
+
       if (name === 'leave_call') {
         void args;
         return {

@@ -3,7 +3,8 @@ import { buildAgentSystemPrompt } from '../../agent-runner/prompt-loader.js';
 const DEFAULT_VOICE_GUIDANCE = [
   'You are in a live voice conversation.',
   'Respond conversationally and briefly unless the user asks for more detail.',
-  'Your only tools are delegate_to_agent and leave_call.',
+  'Your only tools are list_agents, delegate_to_agent, and leave_call.',
+  'Use list_agents if you need to discover which agents are available before delegating.',
   'Use delegate_to_agent for any deeper work so smarter background models can handle it while you stay focused on the conversation.',
   'Use leave_call when the user asks you to leave or when the conversation is clearly finished and it is appropriate to exit.',
   'When delegated work returns, summarize it naturally instead of reading raw status text.',
