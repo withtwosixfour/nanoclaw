@@ -20,6 +20,7 @@ import { logger } from '../logger';
 import { getInstanceId, getInstanceName } from '../instance.js';
 import { Agent } from '../types';
 import { createToolRegistry } from './tool-registry';
+import { buildAgentSystemPrompt } from './prompt-loader.js';
 import {
   getCompactionThreshold,
   getModelConfig,
@@ -141,94 +142,6 @@ interface AgentSecrets {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_AUTH_TOKEN?: string;
   OPENCODE_ZEN_API_KEY?: string;
-}
-
-// File watching cache for CLAUDE.md files
-interface FileCache {
-  content: string;
-  mtime: number;
-  watcher?: fs.FSWatcher;
-}
-
-const fileCache = new Map<string, FileCache>();
-
-function getCachedFileContent(filePath: string): string | null {
-  if (!fs.existsSync(filePath)) {
-    // Clean up watcher if file no longer exists
-    const cached = fileCache.get(filePath);
-    if (cached?.watcher) {
-      cached.watcher.close();
-    }
-    fileCache.delete(filePath);
-    return null;
-  }
-
-  const stats = fs.statSync(filePath);
-  const cached = fileCache.get(filePath);
-
-  // If we have a cached version and the file hasn't changed, return it
-  if (cached && cached.mtime === stats.mtimeMs) {
-    return cached.content;
-  }
-
-  // File has changed or not cached, read and cache it
-  try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-
-    // Set up file watcher if not already watching
-    if (!cached?.watcher) {
-      const watcher = fs.watch(filePath, (eventType) => {
-        if (eventType === 'change') {
-          logger.debug({ filePath }, 'CLAUDE.md file changed, clearing cache');
-          // Get the entry and remove from cache first, then close watcher
-          // This prevents race conditions if the callback fires rapidly
-          const entry = fileCache.get(filePath);
-          fileCache.delete(filePath);
-          if (entry?.watcher) {
-            entry.watcher.close();
-          }
-        }
-      });
-
-      fileCache.set(filePath, {
-        content,
-        mtime: stats.mtimeMs,
-        watcher,
-      });
-    } else {
-      // Update cache with new content and mtime
-      fileCache.set(filePath, {
-        content,
-        mtime: stats.mtimeMs,
-        watcher: cached.watcher,
-      });
-    }
-
-    return content;
-  } catch (err) {
-    logger.error({ filePath, err }, 'Failed to read CLAUDE.md file');
-    return null;
-  }
-}
-
-function buildSystemPrompt(agentId: string, isMain: boolean): string {
-  const agentClaude = path.join(AGENTS_DIR, agentId, 'CLAUDE.md');
-  const globalClaude = path.join(AGENTS_DIR, 'global', 'CLAUDE.md');
-  const parts: string[] = [];
-
-  const agentContent = getCachedFileContent(agentClaude);
-  if (agentContent) {
-    parts.push(agentContent.trim());
-  }
-
-  if (!isMain) {
-    const globalContent = getCachedFileContent(globalClaude);
-    if (globalContent) {
-      parts.push(globalContent.trim());
-    }
-  }
-
-  return parts.filter(Boolean).join('\n\n');
 }
 
 function createModel(
@@ -579,7 +492,7 @@ async function runQuery(
 
   const model = createModel(config);
 
-  const systemPrompt = buildSystemPrompt(input.agentId, input.isMain);
+  const systemPrompt = buildAgentSystemPrompt(input.agentId, input.isMain);
   const routeInfo = await getRouteInfo(input.chatJid);
   const routeContext = routeInfo
     ? `You are operating in the conversation "${routeInfo.threadId}" with agent "${routeInfo.agentId}".`

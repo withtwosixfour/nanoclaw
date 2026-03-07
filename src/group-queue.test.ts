@@ -3,9 +3,13 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
-vi.mock('./config.js', () => ({
-  MAX_CONCURRENT_RUNS: 2,
-}));
+vi.mock('./config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./config.js')>();
+  return {
+    ...actual,
+    MAX_CONCURRENT_RUNS: 2,
+  };
+});
 
 describe('GroupQueue', () => {
   let queue: GroupQueue;

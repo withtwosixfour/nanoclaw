@@ -16,6 +16,7 @@ import {
   createAgentRuntime,
   shutdownPostHog,
 } from './agent-runner/runtime';
+import { initializeVoiceBridge } from './voice-bridge/bootstrap';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router';
@@ -155,6 +156,16 @@ async function main(): Promise<void> {
   logger.info('Initializing bot');
 
   await createChatSdkBot();
+
+  await initializeVoiceBridge({
+    sendMessage: async (jid, text, sender) => {
+      await sendMessageToJid(jid, text);
+      if (sender) {
+        logger.debug({ jid, sender }, 'Voice bridge sender override ignored');
+      }
+    },
+    schedulerDeps,
+  });
 
   logger.info('Bot is running. Waiting for events...');
 }

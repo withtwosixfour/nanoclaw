@@ -121,6 +121,16 @@ export async function resolveAgentId(threadId: string): Promise<string | null> {
   // Fast path: exact match on full thread ID
   if (dbRoutes[threadId]) return dbRoutes[threadId];
 
+  const patterns = Object.keys(dbRoutes)
+    .filter((p) => p.includes('*'))
+    .sort((a, b) => patternSpecificity(b) - patternSpecificity(a));
+
+  for (const pattern of patterns) {
+    if (globToRegex(pattern).test(threadId)) {
+      return dbRoutes[pattern];
+    }
+  }
+
   // Parse the thread ID to extract platform and channel
   const parsed = parseThreadId(threadId);
   if (!parsed) return null;
@@ -139,10 +149,6 @@ export async function resolveAgentId(threadId: string): Promise<string | null> {
   }
 
   // Check wildcard patterns (sorted by specificity - most specific first)
-  const patterns = Object.keys(dbRoutes)
-    .filter((p) => p.includes('*'))
-    .sort((a, b) => patternSpecificity(b) - patternSpecificity(a));
-
   // Try matching each pattern against all formats
   for (const pattern of patterns) {
     const regex = globToRegex(pattern);

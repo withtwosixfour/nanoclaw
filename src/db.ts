@@ -23,6 +23,11 @@ import {
   ScheduledTask,
   TaskRunLog,
 } from './types';
+import {
+  VoiceParticipantRecord,
+  VoiceSessionRecord,
+  VoiceTranscriptEntry,
+} from './voice-bridge/types.js';
 
 // Re-export schema for use in other modules
 export { schema };
@@ -894,6 +899,214 @@ export async function getAttachmentsForMessage(
     path: row.path,
     mimeType: row.mimeType,
     size: row.size,
+    createdAt: row.createdAt,
+  }));
+}
+
+export function upsertVoiceSession(session: VoiceSessionRecord): void {
+  db.insert(schema.voiceSessions)
+    .values({
+      voiceSessionId: session.voiceSessionId,
+      platform: session.platform,
+      platformSessionId: session.platformSessionId,
+      routeKey: session.routeKey,
+      agentId: session.agentId,
+      effectivePrompt: session.effectivePrompt,
+      status: session.status,
+      startedBy: session.startedBy ?? null,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt ?? null,
+      linkedTextThreadId: session.linkedTextThreadId ?? null,
+      linkedTextSessionId: session.linkedTextSessionId ?? null,
+      metadataJson: session.metadata ? JSON.stringify(session.metadata) : null,
+    })
+    .onConflictDoUpdate({
+      target: schema.voiceSessions.voiceSessionId,
+      set: {
+        platform: session.platform,
+        platformSessionId: session.platformSessionId,
+        routeKey: session.routeKey,
+        agentId: session.agentId,
+        effectivePrompt: session.effectivePrompt,
+        status: session.status,
+        startedBy: session.startedBy ?? null,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt ?? null,
+        linkedTextThreadId: session.linkedTextThreadId ?? null,
+        linkedTextSessionId: session.linkedTextSessionId ?? null,
+        metadataJson: session.metadata
+          ? JSON.stringify(session.metadata)
+          : null,
+      },
+    })
+    .run();
+}
+
+export async function getVoiceSession(
+  voiceSessionId: string,
+): Promise<VoiceSessionRecord | undefined> {
+  const row = await db
+    .select()
+    .from(schema.voiceSessions)
+    .where(eq(schema.voiceSessions.voiceSessionId, voiceSessionId))
+    .get();
+
+  if (!row) {
+    return undefined;
+  }
+
+  return {
+    voiceSessionId: row.voiceSessionId,
+    platform: row.platform as VoiceSessionRecord['platform'],
+    platformSessionId: row.platformSessionId,
+    routeKey: row.routeKey,
+    agentId: row.agentId,
+    effectivePrompt: row.effectivePrompt,
+    status: row.status as VoiceSessionRecord['status'],
+    startedBy: row.startedBy ?? undefined,
+    startedAt: row.startedAt,
+    endedAt: row.endedAt ?? undefined,
+    linkedTextThreadId: row.linkedTextThreadId ?? undefined,
+    linkedTextSessionId: row.linkedTextSessionId ?? undefined,
+    metadata: row.metadataJson
+      ? (JSON.parse(row.metadataJson) as Record<string, unknown>)
+      : undefined,
+  };
+}
+
+export async function listActiveVoiceSessions(): Promise<VoiceSessionRecord[]> {
+  const rows = await db
+    .select()
+    .from(schema.voiceSessions)
+    .where(eq(schema.voiceSessions.status, 'active'))
+    .orderBy(desc(schema.voiceSessions.startedAt))
+    .all();
+
+  return rows.map((row) => ({
+    voiceSessionId: row.voiceSessionId,
+    platform: row.platform as VoiceSessionRecord['platform'],
+    platformSessionId: row.platformSessionId,
+    routeKey: row.routeKey,
+    agentId: row.agentId,
+    effectivePrompt: row.effectivePrompt,
+    status: row.status as VoiceSessionRecord['status'],
+    startedBy: row.startedBy ?? undefined,
+    startedAt: row.startedAt,
+    endedAt: row.endedAt ?? undefined,
+    linkedTextThreadId: row.linkedTextThreadId ?? undefined,
+    linkedTextSessionId: row.linkedTextSessionId ?? undefined,
+    metadata: row.metadataJson
+      ? (JSON.parse(row.metadataJson) as Record<string, unknown>)
+      : undefined,
+  }));
+}
+
+export function markVoiceSessionEnded(
+  voiceSessionId: string,
+  status: 'ended' | 'failed',
+): void {
+  db.update(schema.voiceSessions)
+    .set({ status, endedAt: new Date().toISOString() })
+    .where(eq(schema.voiceSessions.voiceSessionId, voiceSessionId))
+    .run();
+}
+
+export async function upsertVoiceParticipant(
+  participant: VoiceParticipantRecord,
+): Promise<void> {
+  const existing = await db
+    .select({ id: schema.voiceParticipants.id })
+    .from(schema.voiceParticipants)
+    .where(
+      and(
+        eq(schema.voiceParticipants.voiceSessionId, participant.voiceSessionId),
+        eq(schema.voiceParticipants.participantId, participant.participantId),
+        isNull(schema.voiceParticipants.leftAt),
+      ),
+    )
+    .get();
+
+  if (existing) {
+    db.update(schema.voiceParticipants)
+      .set({ displayName: participant.displayName })
+      .where(eq(schema.voiceParticipants.id, existing.id))
+      .run();
+    return;
+  }
+
+  db.insert(schema.voiceParticipants)
+    .values({
+      voiceSessionId: participant.voiceSessionId,
+      participantId: participant.participantId,
+      displayName: participant.displayName,
+      joinedAt: participant.joinedAt,
+      leftAt: participant.leftAt ?? null,
+    })
+    .run();
+}
+
+export function markVoiceParticipantLeft(
+  voiceSessionId: string,
+  participantId: string,
+): void {
+  db.update(schema.voiceParticipants)
+    .set({ leftAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(schema.voiceParticipants.voiceSessionId, voiceSessionId),
+        eq(schema.voiceParticipants.participantId, participantId),
+        isNull(schema.voiceParticipants.leftAt),
+      ),
+    )
+    .run();
+}
+
+export async function listVoiceParticipants(
+  voiceSessionId: string,
+): Promise<VoiceParticipantRecord[]> {
+  const rows = await db
+    .select()
+    .from(schema.voiceParticipants)
+    .where(eq(schema.voiceParticipants.voiceSessionId, voiceSessionId))
+    .orderBy(asc(schema.voiceParticipants.joinedAt))
+    .all();
+
+  return rows.map((row) => ({
+    voiceSessionId: row.voiceSessionId,
+    participantId: row.participantId,
+    displayName: row.displayName,
+    joinedAt: row.joinedAt,
+    leftAt: row.leftAt ?? undefined,
+  }));
+}
+
+export function appendVoiceTranscript(entry: VoiceTranscriptEntry): void {
+  db.insert(schema.voiceTranscripts)
+    .values({
+      voiceSessionId: entry.voiceSessionId,
+      participantId: entry.participantId ?? null,
+      role: entry.role,
+      content: entry.content,
+      createdAt: entry.createdAt,
+    })
+    .run();
+}
+
+export async function listVoiceTranscripts(
+  voiceSessionId: string,
+): Promise<VoiceTranscriptEntry[]> {
+  const rows = await db
+    .select()
+    .from(schema.voiceTranscripts)
+    .where(eq(schema.voiceTranscripts.voiceSessionId, voiceSessionId))
+    .orderBy(asc(schema.voiceTranscripts.createdAt))
+    .all();
+
+  return rows.map((row) => ({
+    voiceSessionId: row.voiceSessionId,
+    participantId: row.participantId ?? undefined,
+    role: row.role as VoiceTranscriptEntry['role'],
+    content: row.content,
     createdAt: row.createdAt,
   }));
 }

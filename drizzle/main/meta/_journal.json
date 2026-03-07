@@ -15,6 +15,13 @@
       "when": 1772315771951,
       "tag": "0001_stiff_siren",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1772816400000,
+      "tag": "0002_handy_chorus",
+      "breakpoints": true
     }
   ]
 }

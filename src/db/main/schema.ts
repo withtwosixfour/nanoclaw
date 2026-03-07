@@ -207,6 +207,72 @@ export const conversationHistory = sqliteTable(
   }),
 );
 
+export const voiceSessions = sqliteTable(
+  'voice_sessions',
+  {
+    voiceSessionId: text('voice_session_id').primaryKey(),
+    platform: text('platform').notNull(),
+    platformSessionId: text('platform_session_id').notNull(),
+    routeKey: text('route_key').notNull(),
+    agentId: text('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    effectivePrompt: text('effective_prompt').notNull(),
+    status: text('status').notNull(),
+    startedBy: text('started_by'),
+    startedAt: text('started_at').notNull(),
+    endedAt: text('ended_at'),
+    linkedTextThreadId: text('linked_text_thread_id'),
+    linkedTextSessionId: text('linked_text_session_id'),
+    metadataJson: text('metadata_json'),
+  },
+  (table) => ({
+    platformIdx: index('idx_voice_sessions_platform').on(table.platform),
+    routeIdx: index('idx_voice_sessions_route').on(table.routeKey),
+    statusIdx: index('idx_voice_sessions_status').on(table.status),
+    startedAtIdx: index('idx_voice_sessions_started_at').on(table.startedAt),
+  }),
+);
+
+export const voiceParticipants = sqliteTable(
+  'voice_participants',
+  {
+    id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+    voiceSessionId: text('voice_session_id')
+      .notNull()
+      .references(() => voiceSessions.voiceSessionId),
+    participantId: text('participant_id').notNull(),
+    displayName: text('display_name').notNull(),
+    joinedAt: text('joined_at').notNull(),
+    leftAt: text('left_at'),
+  },
+  (table) => ({
+    sessionParticipantIdx: index(
+      'idx_voice_participants_session_participant',
+    ).on(table.voiceSessionId, table.participantId),
+  }),
+);
+
+export const voiceTranscripts = sqliteTable(
+  'voice_transcripts',
+  {
+    id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+    voiceSessionId: text('voice_session_id')
+      .notNull()
+      .references(() => voiceSessions.voiceSessionId),
+    participantId: text('participant_id'),
+    role: text('role').notNull(),
+    content: text('content').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => ({
+    sessionCreatedIdx: index('idx_voice_transcripts_session_created').on(
+      table.voiceSessionId,
+      table.createdAt,
+    ),
+  }),
+);
+
 // Chat SDK tables - merged from chat-sdk-state-sqlite.ts
 
 // Subscriptions table
