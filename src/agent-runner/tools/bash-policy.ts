@@ -868,11 +868,7 @@ export function evaluateBashCommandPolicy(
           continue;
         }
 
-        const isAllowed = argRule.allowFlags.some((flag) =>
-          flagMatchesArg(flag, arg),
-        );
-
-        if (!isAllowed && !argUsesOnlyAllowedFlags(arg, argRule.allowFlags)) {
+        if (!argUsesOnlyAllowedFlags(arg, argRule.allowFlags)) {
           return {
             allowed: false,
             reason: `Blocked by bash policy (${policy.sourcePath}): command "${segment.command}" uses non-allowed flag "${arg}".`,

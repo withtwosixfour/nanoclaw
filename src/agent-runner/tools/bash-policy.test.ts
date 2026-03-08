@@ -283,6 +283,28 @@ describe('bash-policy load and evaluate', () => {
     expect(evaluateBashCommandPolicy(load.policy, 'ls -la').allowed).toBe(true);
   });
 
+  it('denies combined short flags when any short flag is not allowlisted', async () => {
+    const agentDir = makeAgentDir();
+    writePolicy(agentDir, {
+      mode: 'whitelist',
+      commands: { whitelist: ['rm'] },
+      args: {
+        rm: {
+          allowFlags: ['-r'],
+        },
+      },
+    });
+
+    const load = await loadBashPolicy(agentDir);
+    if (!load.ok || !load.found) {
+      throw new Error('Expected policy to load');
+    }
+
+    expect(evaluateBashCommandPolicy(load.policy, 'rm -rf /tmp').allowed).toBe(
+      false,
+    );
+  });
+
   it('parses bare subshell and backtick correctly', () => {
     // Test that parsing works correctly for subshells
     const subshellSegments = parseCommandSegments('(rm -rf /tmp)');
