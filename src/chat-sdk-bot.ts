@@ -243,6 +243,16 @@ function getUnroutedStatus(chatJid: string): string {
   return `Status: agent=unrouted session=none thread=${threadId} platform=${parsed.platform} channel=${parsed.channelId}`;
 }
 
+function getChatIdResponse(chatJid: string): string {
+  const threadId = jidToThreadId(chatJid);
+  return `This channel's ID is: \`${threadId}\`
+
+Add this to your \`ROUTES\` in \`src/router.ts\`:
+\`\`\`typescript
+'${chatJid}': 'main',
+\`\`\``;
+}
+
 /**
  * Add 👀 reaction to show we're processing
  */
@@ -659,6 +669,11 @@ async function executeCommand(
   sender?: string,
 ): Promise<string> {
   const normalizedCommand = command.toLowerCase().replace(/^\//, '');
+
+  if (normalizedCommand === 'chatid') {
+    return getChatIdResponse(chatJid);
+  }
+
   const agent = await resolveAgentForJid(chatJid);
 
   if (!agent && normalizedCommand === 'status') {
@@ -691,14 +706,6 @@ async function executeCommand(
     const lastTs =
       (await getSessionLastTimestamp(chatJid, session.sessionId)) || 'none';
     return `Status: agent=${agent.id} session=${session.sessionId} model=${modelProvider}/${modelName} messages=${messageCount} tokens=${tokenCount} last=${lastTs}`;
-  } else if (normalizedCommand === 'chatid') {
-    const threadId = jidToThreadId(chatJid);
-    return `This channel's ID is: \`${threadId}\`
-
-Add this to your \`ROUTES\` in \`src/router.ts\`:
-\`\`\`typescript
-'${chatJid}': 'main',
-\`\`\``;
   } else if (normalizedCommand === 'update') {
     // Authorization check would go here
     const pendingPath = path.join(DATA_DIR, 'update-pending.json');
@@ -882,6 +889,23 @@ export async function createChatSdkBot(): Promise<Chat> {
 
   // Handle subscribed messages (follow-ups in same thread)
   bot.onSubscribedMessage(async (thread, message) => {
+    const command = getSupportedCommand(message.text || '');
+    if (command) {
+      const response = await executeCommand(
+        thread.id,
+        command,
+        message.author?.userId,
+      );
+      await thread.post(response);
+      return;
+    }
+
+    const agent = await resolveAgentForJid(thread.id);
+
+    if (!agent) {
+      return;
+    }
+
     // Get content
     let content = message.text || '';
 
@@ -906,24 +930,6 @@ export async function createChatSdkBot(): Promise<Chat> {
           content = mediaNotes.join('\n');
         }
       }
-    }
-
-    // Check for commands
-    const command = getSupportedCommand(content);
-    if (command) {
-      const response = await executeCommand(
-        thread.id,
-        command,
-        message.author?.userId,
-      );
-      await thread.post(response);
-      return;
-    }
-
-    const agent = await resolveAgentForJid(thread.id);
-
-    if (!agent) {
-      return;
     }
 
     // Add acknowledgement
