@@ -46,7 +46,6 @@ import type {
 const VOICE_JOIN_COMMAND = 'voice-join';
 const VOICE_LEAVE_COMMAND = 'voice-leave';
 const require = createRequire(import.meta.url);
-const DISCORD_SPEECH_STOP_DEBOUNCE_MS = 300;
 const DISCORD_USER_AUDIO_END_SILENCE_MS = 400;
 
 function hasAnyDiscordEncryptionLibrary(): boolean {
@@ -128,7 +127,6 @@ interface ActiveDiscordSession {
   outputStream: PassThrough;
   outputResource: ReturnType<typeof createAudioResource>;
   subscribedUsers: Set<string>;
-  pendingSpeechStopTimers: Map<string, NodeJS.Timeout>;
   outputChunkCount: number;
   outputBytesQueued: number;
   lastOutputChunkAtMs?: number;
@@ -392,7 +390,6 @@ export class DiscordGatewayVoiceTransport {
       outputStream,
       outputResource,
       subscribedUsers: new Set(),
-      pendingSpeechStopTimers: new Map(),
       outputChunkCount: 0,
       outputBytesQueued: 0,
       outputResetCount: 0,
@@ -400,18 +397,6 @@ export class DiscordGatewayVoiceTransport {
     this.sessions.set(sessionId, active);
 
     connection.receiver.speaking.on('start', (userId) => {
-      const pendingStopTimer = active.pendingSpeechStopTimers.get(userId);
-      if (pendingStopTimer) {
-        clearTimeout(pendingStopTimer);
-        active.pendingSpeechStopTimers.delete(userId);
-        logger.debug(
-          { sessionId, userId, debounceMs: DISCORD_SPEECH_STOP_DEBOUNCE_MS },
-          'Coalescing rapid Discord speech restart',
-        );
-        this.subscribeToUserAudio(active, userId);
-        return;
-      }
-
       logger.debug(
         {
           sessionId,
@@ -420,52 +405,7 @@ export class DiscordGatewayVoiceTransport {
         },
         'Discord receiver speaking started',
       );
-      this.emitter.emit('event', {
-        type: 'speech.started',
-        sessionId,
-        participantId: userId,
-      } satisfies VoiceEvent);
       this.subscribeToUserAudio(active, userId);
-    });
-
-    connection.receiver.speaking.on('end', (userId) => {
-      const existingTimer = active.pendingSpeechStopTimers.get(userId);
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-      }
-
-      logger.debug(
-        {
-          sessionId,
-          userId,
-          subscribedUsers: active.subscribedUsers.size,
-          outputChunkCount: active.outputChunkCount,
-          bufferedOutputBytes: active.outputStream.writableLength,
-          debounceMs: DISCORD_SPEECH_STOP_DEBOUNCE_MS,
-        },
-        'Discord receiver speaking ended, scheduling debounced stop',
-      );
-
-      const timer = setTimeout(() => {
-        active.pendingSpeechStopTimers.delete(userId);
-        logger.debug(
-          {
-            sessionId,
-            userId,
-            subscribedUsers: active.subscribedUsers.size,
-            outputChunkCount: active.outputChunkCount,
-            bufferedOutputBytes: active.outputStream.writableLength,
-          },
-          'Discord receiver speaking ended',
-        );
-        this.emitter.emit('event', {
-          type: 'speech.stopped',
-          sessionId,
-          participantId: userId,
-        } satisfies VoiceEvent);
-      }, DISCORD_SPEECH_STOP_DEBOUNCE_MS);
-      timer.unref?.();
-      active.pendingSpeechStopTimers.set(userId, timer);
     });
 
     connection.on(VoiceConnectionStatus.Disconnected, () => {
@@ -531,7 +471,6 @@ export class DiscordGatewayVoiceTransport {
     session.outputStream.end();
     session.player.stop();
     session.connection.destroy();
-    this.clearPendingSpeechStopTimers(session);
     this.sessions.delete(sessionId);
     this.emitter.emit('event', {
       type: 'session.ended',
@@ -862,7 +801,6 @@ export class DiscordGatewayVoiceTransport {
 
     session.outputStream.end();
     session.player.stop();
-    this.clearPendingSpeechStopTimers(session);
     this.sessions.delete(sessionId);
     this.emitter.emit('event', {
       type: 'session.ended',
@@ -905,13 +843,6 @@ export class DiscordGatewayVoiceTransport {
     session.outputChunkCount = 0;
     session.outputBytesQueued = 0;
     session.lastOutputChunkAtMs = undefined;
-  }
-
-  private clearPendingSpeechStopTimers(session: ActiveDiscordSession): void {
-    for (const timer of session.pendingSpeechStopTimers.values()) {
-      clearTimeout(timer);
-    }
-    session.pendingSpeechStopTimers.clear();
   }
 }
 

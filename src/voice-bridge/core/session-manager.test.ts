@@ -95,10 +95,10 @@ describe('VoiceBridgeSessionManager', () => {
         },
       },
       {
-        create: () => realtime as any,
+        create: () => realtime,
       },
     );
-    manager.registerAdapter(adapter as any);
+    manager.registerAdapter(adapter);
 
     const record = await manager.startSession({
       platform: 'discord',
@@ -111,7 +111,24 @@ describe('VoiceBridgeSessionManager', () => {
 
     expect(record.agentId).toBe('main');
     expect(dbFns.upsertVoiceSession).toHaveBeenCalled();
-    expect(realtime.connect).toHaveBeenCalled();
+    expect(realtime.connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputAudio: {
+          noiseReduction: 'far_field',
+          turnDetection: {
+            type: 'server_vad',
+            threshold: 0.5,
+            prefixPaddingMs: 300,
+            silenceDurationMs: 500,
+            createResponse: true,
+            interruptResponse: true,
+          },
+        },
+        outputAudio: {
+          sampleRate: 24000,
+        },
+      }),
+    );
 
     adapter.emit('event', {
       type: 'audio.input',
@@ -261,58 +278,45 @@ describe('VoiceBridgeSessionManager', () => {
     });
   });
 
-  it('ignores rapid speech restarts when no model response is active', async () => {
-    vi.useFakeTimers();
-
-    try {
-      const adapter = new FakeAdapter();
-      const realtime = new FakeRealtimeSession();
-      const { VoiceBridgeSessionManager } =
-        await import('./session-manager.js');
-      const manager = new VoiceBridgeSessionManager(
-        {
+  it('interrupts Discord output when realtime speech starts', async () => {
+    const adapter = new FakeAdapter();
+    const realtime = new FakeRealtimeSession();
+    const { VoiceBridgeSessionManager } = await import('./session-manager.js');
+    const manager = new VoiceBridgeSessionManager(
+      {
+        sendMessage: async () => undefined,
+        schedulerDeps: {
+          agents: async () => ({}),
+          getSessions: async () => ({}),
+          runAgent: async () => ({ status: 'success', result: 'ok' }),
           sendMessage: async () => undefined,
-          schedulerDeps: {
-            agents: async () => ({}),
-            getSessions: async () => ({}),
-            runAgent: async () => ({ status: 'success', result: 'ok' }),
-            sendMessage: async () => undefined,
-          },
         },
-        {
-          create: () => realtime as any,
-        },
+      },
+      {
+        create: () => realtime as any,
+      },
+    );
+    manager.registerAdapter(adapter as any);
+
+    const record = await manager.startSession({
+      platform: 'discord',
+      mode: 'direct',
+      targetId: 'user-1',
+      routeKey: 'voice:discord:dm:user-1',
+    });
+
+    realtime.emit('event', {
+      type: 'speech.started',
+      sessionId: record.voiceSessionId,
+      itemId: 'item-1',
+      audioStartMs: 120,
+    });
+
+    await vi.waitFor(() => {
+      expect(adapter.interruptOutput).toHaveBeenCalledWith(
+        'platform-session-1',
       );
-      manager.registerAdapter(adapter as any);
-
-      await manager.startSession({
-        platform: 'discord',
-        mode: 'direct',
-        targetId: 'user-1',
-        routeKey: 'voice:discord:dm:user-1',
-      });
-
-      adapter.emit('event', {
-        type: 'speech.stopped',
-        sessionId: 'platform-session-1',
-        participantId: 'user-1',
-      });
-
-      vi.advanceTimersByTime(10);
-
-      adapter.emit('event', {
-        type: 'speech.started',
-        sessionId: 'platform-session-1',
-        participantId: 'user-1',
-      });
-
-      vi.advanceTimersByTime(400);
-      await vi.runAllTimersAsync();
-
-      expect(adapter.interruptOutput).not.toHaveBeenCalled();
-      expect(realtime.interrupt).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+    });
+    expect(realtime.interrupt).not.toHaveBeenCalled();
   });
 });

@@ -7,6 +7,7 @@ import {
   voiceStreamDiagnosticsEnabled,
 } from '../diagnostics.js';
 import type {
+  RealtimeInputAudioConfig,
   RealtimeEvent,
   RealtimeSession,
   RealtimeSessionConfig,
@@ -33,7 +34,6 @@ function defaultSocketFactory(url: string): RealtimeSocketLike {
   return new WebSocket(url, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      'OpenAI-Beta': 'realtime=v1',
     },
   });
 }
@@ -60,6 +60,12 @@ class OpenAIRealtimeSession implements RealtimeSession {
   private firstAudioChunkAtMs?: number;
 
   private lastAudioChunkAtMs?: number;
+
+  private connectResolved = false;
+
+  private connectResolve?: () => void;
+
+  private connectReject?: (error: Error) => void;
 
   constructor(
     private readonly sessionId: string,
@@ -94,33 +100,33 @@ class OpenAIRealtimeSession implements RealtimeSession {
       const socket = this.socketFactory(url.toString());
       this.socket = socket;
 
-      socket.on('open', () => {
-        logger.info(
-          { sessionId: this.sessionId, model: config.model },
-          'OpenAI realtime socket opened',
-        );
-        socket.send(
-          JSON.stringify({
-            type: 'session.update',
-            session: {
-              instructions: config.instructions,
-              voice: config.voice,
-              speed: config.speed,
-              tools: config.tools.map((tool) => ({
-                type: 'function',
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.inputSchema,
-              })),
-            },
-          }),
-        );
+      this.connectResolved = false;
+      this.connectResolve = () => {
+        if (settled || this.connectResolved) {
+          return;
+        }
+        this.connectResolved = true;
         this.emitter.emit('event', {
           type: 'session.ready',
           sessionId: this.sessionId,
         } satisfies RealtimeEvent);
         settled = true;
         resolve();
+      };
+      this.connectReject = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+
+      socket.on('open', () => {
+        logger.info(
+          { sessionId: this.sessionId, model: config.model },
+          'OpenAI realtime socket opened',
+        );
+        socket.send(JSON.stringify(this.buildSessionUpdate(config)));
       });
 
       socket.on('message', (data) => {
@@ -137,10 +143,7 @@ class OpenAIRealtimeSession implements RealtimeSession {
           sessionId: this.sessionId,
           error: error.message,
         } satisfies RealtimeEvent);
-        if (!settled) {
-          settled = true;
-          reject(error);
-        }
+        this.connectReject?.(error);
       });
 
       socket.on('close', () => {
@@ -152,6 +155,11 @@ class OpenAIRealtimeSession implements RealtimeSession {
           type: 'session.closed',
           sessionId: this.sessionId,
         } satisfies RealtimeEvent);
+        if (!this.connectResolved) {
+          this.connectReject?.(
+            new Error('OpenAI realtime socket closed before session was ready'),
+          );
+        }
       });
     });
   }
@@ -235,6 +243,9 @@ class OpenAIRealtimeSession implements RealtimeSession {
     );
     this.socket?.close();
     this.socket = null;
+    this.connectResolved = false;
+    this.connectResolve = undefined;
+    this.connectReject = undefined;
   }
 
   onEvent(handler: (event: RealtimeEvent) => void): void {
@@ -254,7 +265,10 @@ class OpenAIRealtimeSession implements RealtimeSession {
     }
 
     const eventType = typeof event.type === 'string' ? event.type : 'unknown';
-    if (eventType !== 'response.audio.delta') {
+    if (
+      eventType !== 'response.audio.delta' &&
+      eventType !== 'response.output_audio.delta'
+    ) {
       logger.debug(
         {
           sessionId: this.sessionId,
@@ -266,6 +280,34 @@ class OpenAIRealtimeSession implements RealtimeSession {
     }
 
     switch (event.type) {
+      case 'session.updated': {
+        this.connectResolve?.();
+        break;
+      }
+      case 'input_audio_buffer.speech_started': {
+        this.emitter.emit('event', {
+          type: 'speech.started',
+          sessionId: this.sessionId,
+          itemId: typeof event.item_id === 'string' ? event.item_id : undefined,
+          audioStartMs:
+            typeof event.audio_start_ms === 'number'
+              ? event.audio_start_ms
+              : undefined,
+        } satisfies RealtimeEvent);
+        break;
+      }
+      case 'input_audio_buffer.speech_stopped': {
+        this.emitter.emit('event', {
+          type: 'speech.stopped',
+          sessionId: this.sessionId,
+          itemId: typeof event.item_id === 'string' ? event.item_id : undefined,
+          audioEndMs:
+            typeof event.audio_end_ms === 'number'
+              ? event.audio_end_ms
+              : undefined,
+        } satisfies RealtimeEvent);
+        break;
+      }
       case 'response.created': {
         const response =
           typeof event.response === 'object' && event.response !== null
@@ -302,7 +344,8 @@ class OpenAIRealtimeSession implements RealtimeSession {
         } satisfies RealtimeEvent);
         break;
       }
-      case 'response.audio.delta': {
+      case 'response.audio.delta':
+      case 'response.output_audio.delta': {
         const audio = typeof event.delta === 'string' ? event.delta : '';
         const pcm16 = Buffer.from(audio, 'base64');
         const sampleRate =
@@ -369,7 +412,8 @@ class OpenAIRealtimeSession implements RealtimeSession {
         } satisfies RealtimeEvent);
         break;
       }
-      case 'response.audio_transcript.done': {
+      case 'response.audio_transcript.done':
+      case 'response.output_audio_transcript.done': {
         this.emitter.emit('event', {
           type: 'transcript.final',
           sessionId: this.sessionId,
@@ -513,6 +557,9 @@ class OpenAIRealtimeSession implements RealtimeSession {
           { sessionId: this.sessionId, event },
           'OpenAI realtime API returned an error event',
         );
+        if (!this.connectResolved) {
+          this.connectReject?.(new Error(errorMessage));
+        }
         this.emitter.emit('event', {
           type: 'session.error',
           sessionId: this.sessionId,
@@ -529,6 +576,81 @@ class OpenAIRealtimeSession implements RealtimeSession {
     if (!this.socket) {
       throw new Error('Realtime session is not connected');
     }
+  }
+
+  private buildSessionUpdate(
+    config: RealtimeSessionConfig,
+  ): Record<string, unknown> {
+    const inputSampleRate = config.inputAudio?.sampleRate ?? 24000;
+    const outputSampleRate = config.outputAudio?.sampleRate ?? 24000;
+    const inputAudio = this.buildInputAudioConfig(config.inputAudio);
+    const outputAudio: Record<string, unknown> = {
+      format: {
+        type: 'audio/pcm',
+        rate: outputSampleRate,
+      },
+    };
+
+    if (config.voice) {
+      outputAudio.voice = config.voice;
+    }
+
+    if (typeof config.speed === 'number') {
+      outputAudio.speed = config.speed;
+    }
+
+    return {
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        instructions: config.instructions,
+        audio: {
+          input: {
+            format: {
+              type: 'audio/pcm',
+              rate: inputSampleRate,
+            },
+            ...inputAudio,
+          },
+          output: outputAudio,
+        },
+        tools: config.tools.map((tool) => ({
+          type: 'function',
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema,
+        })),
+      },
+    };
+  }
+
+  private buildInputAudioConfig(
+    config?: RealtimeInputAudioConfig,
+  ): Record<string, unknown> {
+    const inputAudio: Record<string, unknown> = {};
+
+    if (config?.noiseReduction) {
+      inputAudio.noise_reduction = { type: config.noiseReduction };
+    }
+
+    if (config?.transcriptionModel) {
+      inputAudio.transcription = { model: config.transcriptionModel };
+    }
+
+    if (config?.turnDetection) {
+      inputAudio.turn_detection = {
+        type: config.turnDetection.type,
+        threshold: config.turnDetection.threshold,
+        prefix_padding_ms: config.turnDetection.prefixPaddingMs,
+        silence_duration_ms: config.turnDetection.silenceDurationMs,
+        create_response: config.turnDetection.createResponse,
+        interrupt_response: config.turnDetection.interruptResponse,
+      };
+    } else if (config?.turnDetection === null) {
+      inputAudio.turn_detection = null;
+    }
+
+    return inputAudio;
   }
 
   private summarizeRealtimeEvent(

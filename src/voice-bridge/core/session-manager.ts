@@ -57,10 +57,6 @@ interface OutputDispatchDiagnostics {
 }
 
 export class VoiceBridgeSessionManager {
-  private static readonly SPEECH_INTERRUPT_DEBOUNCE_MS = 250;
-
-  private static readonly SPEECH_RESTART_GRACE_MS = 300;
-
   private readonly emitter = new EventEmitter();
 
   private readonly adapters = new Map<VoicePlatform, VoicePlatformAdapter>();
@@ -68,8 +64,6 @@ export class VoiceBridgeSessionManager {
   private readonly activeSessions = new Map<string, ActiveVoiceSession>();
 
   private readonly lastSpeechStoppedAtMs = new Map<string, number>();
-
-  private readonly pendingSpeechInterrupts = new Map<string, NodeJS.Timeout>();
 
   private readonly activeResponseBySession = new Map<string, boolean>();
 
@@ -161,7 +155,6 @@ export class VoiceBridgeSessionManager {
     await active.realtime.close();
     await active.adapter.stopSession(active.record.platformSessionId);
     markVoiceSessionEnded(voiceSessionId, 'ended');
-    this.clearSessionSpeechState(voiceSessionId);
     this.lastSpeechStoppedAtMs.delete(voiceSessionId);
     this.activeResponseBySession.delete(voiceSessionId);
     this.activeSessions.delete(voiceSessionId);
@@ -272,8 +265,21 @@ export class VoiceBridgeSessionManager {
       sessionId: voiceSessionId,
       model: process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-1.5',
       voice: process.env.OPENAI_REALTIME_VOICE || 'cedar',
-      input_audio_noise_reduction: 'far_field',
       instructions: effectivePrompt,
+      inputAudio: {
+        noiseReduction: 'far_field' as const,
+        turnDetection: {
+          type: 'server_vad' as const,
+          threshold: 0.5,
+          prefixPaddingMs: 300,
+          silenceDurationMs: 500,
+          createResponse: true,
+          interruptResponse: true,
+        },
+      },
+      outputAudio: {
+        sampleRate: 24000,
+      },
       tools: toolBridge.definitions,
     };
 
@@ -287,7 +293,6 @@ export class VoiceBridgeSessionManager {
       await realtime.connect(params);
     } catch (err) {
       this.activeSessions.delete(voiceSessionId);
-      this.clearSessionSpeechState(voiceSessionId);
       this.lastSpeechStoppedAtMs.delete(voiceSessionId);
       this.activeResponseBySession.delete(voiceSessionId);
       this.outputDiagnosticsBySession.delete(voiceSessionId);
@@ -309,7 +314,17 @@ export class VoiceBridgeSessionManager {
       throw err;
     }
 
-    logger.info(params, 'Realtime voice session connected');
+    logger.info(
+      {
+        voiceSessionId,
+        model: params.model,
+        voice: params.voice,
+        toolCount: params.tools.length,
+        turnDetection: params.inputAudio.turnDetection?.type,
+        noiseReduction: params.inputAudio.noiseReduction,
+      },
+      'Realtime voice session connected',
+    );
 
     this.emitter.emit('event', {
       type: 'voice.session.started',
@@ -374,76 +389,6 @@ export class VoiceBridgeSessionManager {
       case 'audio.input':
         await active.realtime.appendInputAudio(event.pcm16, event.sampleRate);
         break;
-      case 'speech.started':
-        const lastStoppedAt = this.lastSpeechStoppedAtMs.get(
-          active.record.voiceSessionId,
-        );
-        const msSinceLastStop =
-          typeof lastStoppedAt === 'number'
-            ? Date.now() - lastStoppedAt
-            : undefined;
-        const activeResponse =
-          this.activeResponseBySession.get(active.record.voiceSessionId) ??
-          false;
-
-        if (
-          !activeResponse &&
-          typeof msSinceLastStop === 'number' &&
-          msSinceLastStop < VoiceBridgeSessionManager.SPEECH_RESTART_GRACE_MS
-        ) {
-          logger.debug(
-            {
-              voiceSessionId: active.record.voiceSessionId,
-              participantId: event.participantId,
-              msSinceLastStop,
-              graceMs: VoiceBridgeSessionManager.SPEECH_RESTART_GRACE_MS,
-            },
-            'Ignoring rapid speech restart during no-response grace window',
-          );
-          break;
-        }
-
-        this.scheduleSpeechInterrupt(
-          active.record.voiceSessionId,
-          event.participantId,
-        );
-        logger.debug(
-          {
-            voiceSessionId: active.record.voiceSessionId,
-            participantId: event.participantId,
-            msSinceLastStop,
-            debounceMs: VoiceBridgeSessionManager.SPEECH_INTERRUPT_DEBOUNCE_MS,
-          },
-          'User speech started; scheduling assistant interruption',
-        );
-        break;
-      case 'speech.stopped':
-        const interruptKey = this.speechInterruptKey(
-          active.record.voiceSessionId,
-          event.participantId,
-        );
-        const hadPendingInterrupt =
-          this.pendingSpeechInterrupts.has(interruptKey);
-        this.clearPendingSpeechInterrupt(
-          active.record.voiceSessionId,
-          event.participantId,
-        );
-        this.lastSpeechStoppedAtMs.set(
-          active.record.voiceSessionId,
-          Date.now(),
-        );
-        logger.debug(
-          {
-            voiceSessionId: active.record.voiceSessionId,
-            participantId: event.participantId,
-            hadPendingInterrupt,
-            activeResponse:
-              this.activeResponseBySession.get(active.record.voiceSessionId) ??
-              false,
-          },
-          'User speech stopped',
-        );
-        break;
       case 'transcript.final':
         logger.debug(
           {
@@ -496,6 +441,30 @@ export class VoiceBridgeSessionManager {
     }
 
     switch (event.type) {
+      case 'speech.started':
+        logger.debug(
+          {
+            voiceSessionId,
+            itemId: event.itemId,
+            audioStartMs: event.audioStartMs,
+            activeResponse:
+              this.activeResponseBySession.get(voiceSessionId) ?? false,
+          },
+          'Realtime provider detected user speech start; interrupting adapter output',
+        );
+        await active.adapter.interruptOutput(active.record.platformSessionId);
+        break;
+      case 'speech.stopped':
+        this.lastSpeechStoppedAtMs.set(voiceSessionId, Date.now());
+        logger.debug(
+          {
+            voiceSessionId,
+            itemId: event.itemId,
+            audioEndMs: event.audioEndMs,
+          },
+          'Realtime provider detected user speech stop',
+        );
+        break;
       case 'response.started': {
         this.activeResponseBySession.set(voiceSessionId, true);
         this.outputDiagnosticsBySession.set(voiceSessionId, {
@@ -662,19 +631,12 @@ export class VoiceBridgeSessionManager {
       case 'session.error':
         logger.error(
           { voiceSessionId, error: event.error },
-          'Realtime voice session failed',
+          'Realtime voice session reported provider error',
         );
-        markVoiceSessionEnded(voiceSessionId, 'failed');
-        this.clearSessionSpeechState(voiceSessionId);
-        this.lastSpeechStoppedAtMs.delete(voiceSessionId);
-        this.activeResponseBySession.delete(voiceSessionId);
-        this.outputDiagnosticsBySession.delete(voiceSessionId);
-        this.activeSessions.delete(voiceSessionId);
         break;
       case 'session.closed':
         logger.info({ voiceSessionId }, 'Realtime voice session closed');
         markVoiceSessionEnded(voiceSessionId, 'ended');
-        this.clearSessionSpeechState(voiceSessionId);
         this.lastSpeechStoppedAtMs.delete(voiceSessionId);
         this.activeResponseBySession.delete(voiceSessionId);
         this.outputDiagnosticsBySession.delete(voiceSessionId);
@@ -719,90 +681,6 @@ export class VoiceBridgeSessionManager {
     await active.realtime.addMessage('system', update.message, {
       triggerResponse: update.announce,
     });
-  }
-
-  private scheduleSpeechInterrupt(
-    voiceSessionId: string,
-    participantId: string,
-  ): void {
-    this.clearPendingSpeechInterrupt(voiceSessionId, participantId);
-    const key = this.speechInterruptKey(voiceSessionId, participantId);
-    const timer = setTimeout(() => {
-      void this.runSpeechInterrupt(voiceSessionId, participantId);
-    }, VoiceBridgeSessionManager.SPEECH_INTERRUPT_DEBOUNCE_MS);
-    timer.unref?.();
-    this.pendingSpeechInterrupts.set(key, timer);
-  }
-
-  private clearPendingSpeechInterrupt(
-    voiceSessionId: string,
-    participantId: string,
-  ): void {
-    const key = this.speechInterruptKey(voiceSessionId, participantId);
-    const timer = this.pendingSpeechInterrupts.get(key);
-    if (!timer) {
-      logger.debug(
-        { voiceSessionId, participantId },
-        'No pending speech interrupt timer to clear',
-      );
-      return;
-    }
-    logger.debug(
-      { voiceSessionId, participantId },
-      'Clearing pending speech interrupt timer',
-    );
-    clearTimeout(timer);
-    this.pendingSpeechInterrupts.delete(key);
-  }
-
-  private clearSessionSpeechState(voiceSessionId: string): void {
-    for (const [key, timer] of this.pendingSpeechInterrupts.entries()) {
-      if (!key.startsWith(`${voiceSessionId}:`)) {
-        continue;
-      }
-      clearTimeout(timer);
-      this.pendingSpeechInterrupts.delete(key);
-    }
-  }
-
-  private async runSpeechInterrupt(
-    voiceSessionId: string,
-    participantId: string,
-  ): Promise<void> {
-    const key = this.speechInterruptKey(voiceSessionId, participantId);
-    this.pendingSpeechInterrupts.delete(key);
-
-    const active = this.activeSessions.get(voiceSessionId);
-    if (!active) {
-      logger.debug(
-        { voiceSessionId, participantId },
-        'Skipping speech interrupt; voice session is no longer active',
-      );
-      return;
-    }
-
-    logger.debug(
-      { voiceSessionId, participantId },
-      'Interrupting assistant output after debounced speech start',
-    );
-    await active.adapter.interruptOutput(active.record.platformSessionId);
-
-    if (!this.activeResponseBySession.get(voiceSessionId)) {
-      logger.debug(
-        { voiceSessionId, participantId },
-        'Skipping realtime cancel; no active model response',
-      );
-      return;
-    }
-
-    await active.realtime.interrupt();
-  }
-
-  private speechInterruptKey(
-    voiceSessionId: string,
-    participantId: string,
-  ): string {
-    return `${voiceSessionId}:${participantId}`;
   }
 
   private async getAgentOrThrow(routeKey: string): Promise<Agent> {

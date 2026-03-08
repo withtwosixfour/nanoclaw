@@ -113,17 +113,51 @@ export interface RealtimeToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+export interface RealtimeTurnDetectionConfig {
+  type: 'server_vad' | 'semantic_vad';
+  threshold?: number;
+  prefixPaddingMs?: number;
+  silenceDurationMs?: number;
+  createResponse?: boolean;
+  interruptResponse?: boolean;
+}
+
+export interface RealtimeInputAudioConfig {
+  sampleRate?: number;
+  noiseReduction?: 'near_field' | 'far_field';
+  transcriptionModel?: string;
+  turnDetection?: RealtimeTurnDetectionConfig | null;
+}
+
+export interface RealtimeOutputAudioConfig {
+  sampleRate?: number;
+}
+
 export interface RealtimeSessionConfig {
   sessionId: string;
   model: string;
   voice?: string;
   instructions: string;
   speed?: number;
+  inputAudio?: RealtimeInputAudioConfig;
+  outputAudio?: RealtimeOutputAudioConfig;
   tools: RealtimeToolDefinition[];
 }
 
 export type RealtimeEvent =
   | { type: 'session.ready'; sessionId: string }
+  | {
+      type: 'speech.started';
+      sessionId: string;
+      itemId?: string;
+      audioStartMs?: number;
+    }
+  | {
+      type: 'speech.stopped';
+      sessionId: string;
+      itemId?: string;
+      audioEndMs?: number;
+    }
   | {
       type: 'response.started';
       sessionId: string;
