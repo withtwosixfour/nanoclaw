@@ -1,0 +1,24 @@
+{
+  "enabled": true,
+  "mode": "blacklist",
+  "commands": {
+    "blacklist": ["rm", "curl", "wget"]
+  },
+  "args": {
+    "git": {
+      "denyFlags": ["--force", "--no-verify"],
+      "denyPatterns": ["push\\s+--force"]
+    },
+    "npm": {
+      "denyFlags": ["--force"]
+    }
+  },
+  "shell": {
+    "denyBuiltins": ["eval", "source"],
+    "denyOperators": []
+  },
+  "audit": {
+    "logAllowed": false,
+    "logDenied": true
+  }
+}

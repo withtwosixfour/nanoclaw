@@ -89,6 +89,20 @@ Or run `/customize` for guided changes.
 
 The codebase is small enough that Claude can safely modify it.
 
+### Optional: per-agent Bash policy
+
+If you want to restrict what the `Bash` tool can run, add this file per agent:
+
+`agents/<agentId>/.nanoclaw/bash-policy.json`
+
+- Missing file: no restrictions (allow all)
+- `mode: "blacklist"` blocks listed commands
+- `mode: "whitelist"` allows only listed commands
+- `args` can deny specific flags or regex patterns per command
+- Command chains are checked segment-by-segment (`&&`, `;`, `|`, `&`, `||`)
+
+Example config: `config-examples/bash-policy.json`
+
 ## Skills System CLI (Experimental)
 
 The new deterministic skills-system primitives are available as local commands:
