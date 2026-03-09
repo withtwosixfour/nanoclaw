@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "npm run typecheck && tsup",
+    "setup": "sudo bash scripts/setup-desktop.sh",
     "update": "git pull && npm install && npm run build && systemctl --user restart nanoclaw",
     "start": "node dist/index.js",
     "dev": "LOG_LEVEL=debug tsx src/index.ts",

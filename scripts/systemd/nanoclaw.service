@@ -1,0 +1,17 @@
+[Unit]
+Description=NanoClaw Personal Assistant
+After=network.target chrome-cdp.service
+Requires=chrome-cdp.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/nanoclaw
+ExecStart=/usr/bin/node /home/ubuntu/nanoclaw/dist/index.js
+Restart=always
+RestartSec=5
+Environment=HOME=/home/ubuntu
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/ubuntu/.local/bin
+EnvironmentFile=-/home/ubuntu/nanoclaw/.env
+
+[Install]
+WantedBy=default.target

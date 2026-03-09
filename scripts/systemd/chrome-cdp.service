@@ -1,0 +1,23 @@
+[Unit]
+Description=Chrome with Remote Debugging (CDP)
+# Note: User services cannot reference system services in After=
+# Chrome will crash-loop until display :1 is ready (Restart=always handles this)
+
+[Service]
+Type=simple
+Environment=DISPLAY=:1
+ExecStart=/usr/bin/google-chrome \
+    --remote-debugging-port=9222 \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-default-apps \
+    --disable-gpu \
+    --window-size=1280,720 \
+    --user-data-dir=%h/.chrome-cdp-profile \
+    about:blank
+ExecStop=/bin/kill -TERM -$MAINPID
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

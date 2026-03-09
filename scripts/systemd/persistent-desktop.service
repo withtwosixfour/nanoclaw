@@ -1,0 +1,16 @@
+[Unit]
+Description=Persistent Virtual Desktop
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Environment="DISPLAY=:1"
+Environment="XAUTHORITY=/home/ubuntu/.Xauthority"
+ExecStartPre=-/bin/bash -c "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1"
+ExecStart=/usr/bin/Xvfb :1 -screen 0 1920x1080x24 +extension GLX +render -noreset
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
