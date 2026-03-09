@@ -14,6 +14,7 @@ SYSTEMD_USER_DIR="${USER_HOME}/.config/systemd/user"
 ENV_FILE="${USER_HOME}/nanoclaw/.env"
 VNC_PASSWD="${USER_HOME}/.vnc/passwd"
 XRUNTIME_DIR="/run/user/$(id -u "${USER_NAME}")"
+NODE_MAJOR="22"
 
 # SUDO for top-level privileged commands (empty if already root)
 if [[ "${EUID}" -eq 0 ]]; then
@@ -38,6 +39,14 @@ ${SUDO} apt-get install -y \
   xvfb
 
 ${SUDO} install -d -m 0755 /etc/apt/keyrings
+if [[ ! -f /etc/apt/keyrings/nodesource.gpg ]]; then
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | ${SUDO} gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+fi
+
+${SUDO} tee /etc/apt/sources.list.d/nodesource.list > /dev/null << EOF
+deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main
+EOF
+
 if [[ ! -f /etc/apt/keyrings/google-chrome.gpg ]]; then
   curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | ${SUDO} gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
 fi
@@ -47,7 +56,7 @@ deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google
 EOF
 
 ${SUDO} apt-get update
-${SUDO} apt-get install -y google-chrome-stable
+${SUDO} apt-get install -y google-chrome-stable nodejs
 
 # Ensure ubuntu user is in docker group for nanoclaw.service
 if getent group docker >/dev/null 2>&1; then
@@ -112,6 +121,9 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   ${SUDO_U} touch "${ENV_FILE}"
   echo "Warning: ${ENV_FILE} created empty. Add your secrets before starting nanoclaw." >&2
 fi
+
+${SUDO_U} npm install
+${SUDO_U} npm run build
 
 ${SUDO} loginctl enable-linger "${USER_NAME}"
 
