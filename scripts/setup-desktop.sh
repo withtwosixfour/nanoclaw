@@ -25,12 +25,6 @@ fi
 # SUDO_U for user-switching (always required, even when root)
 SUDO_U="sudo -u ${USER_NAME}"
 
-# Early prerequisite check: VNC password must exist before we modify the system
-if [[ ! -f "${VNC_PASSWD}" ]]; then
-  echo "Error: ${VNC_PASSWD} missing. Run 'vncpasswd' as ${USER_NAME} to set a VNC password before running this script." >&2
-  exit 1
-fi
-
 ${SUDO} apt-get update
 ${SUDO} apt-get install -y \
   ca-certificates \
@@ -110,6 +104,8 @@ ${SUDO_U} install -m 0644 scripts/systemd/chrome-cdp.service "${SYSTEMD_USER_DIR
 ${SUDO_U} install -m 0644 scripts/systemd/nanoclaw.service "${SYSTEMD_USER_DIR}/nanoclaw.service"
 
 ${SUDO_U} mkdir -p "${USER_HOME}/.vnc"
+${SUDO_U} x11vnc -storepasswd password "${VNC_PASSWD}" > /dev/null
+${SUDO_U} chmod 600 "${VNC_PASSWD}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   ${SUDO_U} mkdir -p "$(dirname "${ENV_FILE}")"
