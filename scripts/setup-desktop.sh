@@ -128,6 +128,7 @@ bitmap_cache=true
 bitmap_compression=true
 max_bpp=24
 xserverbpp=24
+new_cursors=false
 autorun=shared-vnc
 
 [Logging]
@@ -154,6 +155,7 @@ username=na
 password=${REMOTE_DESKTOP_PASSWORD}
 xserverbpp=24
 delay_ms=2000
+enable_dynamic_resizing=false
 EOF
 
 ${SUDO_U} mkdir -p "${SYSTEMD_USER_DIR}"
