@@ -12,6 +12,7 @@ const SECRET_ENV_VARS = [
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'OPENCODE_ZEN_API_KEY',
+  'OPENROUTER_API_KEY',
 ];
 
 function buildSanitizedEnv(): NodeJS.ProcessEnv {
@@ -56,7 +57,7 @@ export function createBashTool(ctx: WorkspaceContext) {
       try {
         const { stdout, stderr } = await execAsync(command, {
           cwd: resolved.resolvedPath,
-          env: process.env,
+          env: buildSanitizedEnv(),
           timeout: timeout ?? 120000,
           maxBuffer: 10 * 1024 * 1024,
           shell: '/bin/bash',
