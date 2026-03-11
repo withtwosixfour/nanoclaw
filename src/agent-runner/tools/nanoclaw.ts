@@ -16,7 +16,11 @@ import {
 import { Agent } from '../../types.js';
 import { logger } from '../../logger.js';
 import { resolveAgentId, isNoReply } from '../../router.js';
-import { getAvailableModels, isModelConfigured } from '../model-config.js';
+import {
+  getAvailableModels,
+  getStaticAvailableModels,
+  isModelConfigured,
+} from '../model-config.js';
 import {
   runTaskNow,
   type SchedulerDependencies,
@@ -56,20 +60,27 @@ async function createOrUpdateAgent(
     return {
       error:
         'Model selection must include both modelProvider and modelName.\n\nAvailable models:\n' +
-        formatAvailableModels(),
+        (await formatAvailableModels()),
     };
   }
 
-  if (
-    input.modelProvider &&
-    input.modelName &&
-    !isModelConfigured(input.modelProvider, input.modelName)
-  ) {
-    return {
-      error:
-        `Invalid model selection: ${input.modelProvider}:${input.modelName}.\n\nAvailable models:\n` +
-        formatAvailableModels(),
-    };
+  if (input.modelProvider && input.modelName) {
+    try {
+      if (!(await isModelConfigured(input.modelProvider, input.modelName))) {
+        return {
+          error:
+            `Invalid model selection: ${input.modelProvider}:${input.modelName}.\n\nAvailable models:\n` +
+            (await formatAvailableModels()),
+        };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        error:
+          `Unable to validate model selection: ${message}\n\nAvailable models:\n` +
+          (await formatAvailableModels()),
+      };
+    }
   }
 
   const agents = await getAllAgents();
@@ -106,18 +117,30 @@ function formatTaskList(
     .join('\n');
 }
 
-function formatAvailableModels(): string {
-  const models = getAvailableModels();
-  if (models.length === 0) {
-    return 'No models configured.';
-  }
+async function formatAvailableModels(): Promise<string> {
+  try {
+    const models = await getAvailableModels();
+    if (models.length === 0) {
+      return 'No models configured.';
+    }
 
-  return models
-    .map(
-      (m) =>
-        `- ${m.provider}:${m.modelName} (context=${m.contextWindow}, vision=${m.supportsVision ? 'yes' : 'no'})`,
-    )
-    .join('\n');
+    return models
+      .map(
+        (m) =>
+          `- ${m.provider}:${m.modelName} (context=${m.contextWindow}, vision=${m.supportsVision ? 'yes' : 'no'})`,
+      )
+      .join('\n');
+  } catch (error) {
+    const fallback = getStaticAvailableModels();
+    const fallbackText = fallback
+      .map(
+        (m) =>
+          `- ${m.provider}:${m.modelName} (context=${m.contextWindow}, vision=${m.supportsVision ? 'yes' : 'no'})`,
+      )
+      .join('\n');
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return `${fallbackText}\n\nOpenRouter models unavailable: ${message}`.trim();
+  }
 }
 
 async function scheduleTask(
@@ -444,7 +467,7 @@ export function createNanoClawTools(deps: NanoClawDeps, ctx: NanoClawContext) {
       inputSchema: z.object({}).optional(),
       execute: async () => {
         return {
-          message: `Available models:\n${formatAvailableModels()}`,
+          message: `Available models:\n${await formatAvailableModels()}`,
         };
       },
     }),

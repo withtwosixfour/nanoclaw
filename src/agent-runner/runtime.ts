@@ -25,6 +25,7 @@ import {
   getCompactionThreshold,
   getModelConfig,
   isModelConfigured,
+  listStaticModelKeys,
   listAvailableModelKeys,
   ModelConfig,
 } from './model-config';
@@ -142,22 +143,13 @@ interface AgentSecrets {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_AUTH_TOKEN?: string;
   OPENCODE_ZEN_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
 }
 
 function createModel(
   { provider: configProvider, modelName, isOpenAIResponseFormat }: ModelConfig,
   type?: 'agent' | 'compaction',
 ) {
-  const hasApiKey =
-    (process.env.OPENCODE_ZEN_API_KEY ?? process.env.ANTHROPIC_API_KEY) !=
-    undefined;
-
-  if (!hasApiKey) {
-    throw new Error(
-      'No API key available for selected model provider. Please configure either OPENCODE_ZEN_API_KEY or ANTHROPIC_API_KEY in your environment.',
-    );
-  }
-
   let baseModel;
 
   if (configProvider === 'opencode-zen') {
@@ -183,7 +175,7 @@ function createModel(
       baseModel = provider.responses(modelName);
     } else {
       logger.debug(
-        { provider: configProvider, model: modelName, hasApiKey },
+        { provider: configProvider, model: modelName, hasApiKey: !!apiKey },
         'Creating OpenAI-compatible model',
       );
       const provider = createOpenAICompatible({
@@ -194,6 +186,25 @@ function createModel(
       });
       baseModel = provider(modelName);
     }
+  } else if (configProvider === 'openrouter') {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+
+    if (!apiKey) {
+      throw new Error('OPENROUTER_API_KEY is required for openrouter provider');
+    }
+
+    logger.debug(
+      { provider: configProvider, model: modelName },
+      'Creating OpenRouter model',
+    );
+
+    const provider = createOpenAICompatible({
+      name: 'openrouter',
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey,
+      includeUsage: true,
+    });
+    baseModel = provider(modelName);
   } else {
     if (configProvider !== 'anthropic') {
       logger.warn(
@@ -203,11 +214,16 @@ function createModel(
     }
     const apiKey = process.env.ANTHROPIC_API_KEY;
     const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    if (!apiKey && !authToken) {
+      throw new Error(
+        'ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is required for anthropic provider',
+      );
+    }
     logger.debug(
       {
         provider: 'anthropic',
         model: modelName,
-        hasApiKey,
+        hasApiKey: !!apiKey,
         hasAuthToken: !!authToken,
       },
       'Creating Anthropic model',
@@ -239,7 +255,7 @@ function createModel(
   return baseModel;
 }
 
-function validateRequestedModel(input: AgentInput): void {
+async function validateRequestedModel(input: AgentInput): Promise<void> {
   const hasProvider = !!input.modelProvider;
   const hasModel = !!input.modelName;
 
@@ -255,11 +271,24 @@ function validateRequestedModel(input: AgentInput): void {
 
   const provider = input.modelProvider as string;
   const modelName = input.modelName as string;
-  if (isModelConfigured(provider, modelName)) {
-    return;
+  try {
+    if (await isModelConfigured(provider, modelName)) {
+      return;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(
+      `Unable to validate model selection for ${provider}:${modelName}: ${message}`,
+    );
   }
 
-  const available = listAvailableModelKeys().join(', ');
+  let available: string;
+  try {
+    available = (await listAvailableModelKeys()).join(', ');
+  } catch {
+    available = listStaticModelKeys().join(', ');
+  }
+
   throw new Error(
     `Invalid model selection: ${provider}:${modelName}. Available models: ${available}`,
   );
@@ -475,7 +504,7 @@ async function runQuery(
   pendingAttachments?: Array<{ filePath: string; caption: string }>;
 }> {
   const queryStartTime = Date.now();
-  const config = getModelConfig(input.modelProvider, input.modelName);
+  const config = await getModelConfig(input.modelProvider, input.modelName);
 
   logger.info(
     {
@@ -901,7 +930,7 @@ async function maybeCompactSession(
   sessionId: string,
   usageTokens: number,
 ): Promise<void> {
-  const config = getModelConfig(input.modelProvider, input.modelName);
+  const config = await getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
 
   const currentTokens =
@@ -936,7 +965,7 @@ async function maybeCompactSessionPreflight(
   sessionId: string,
   promptText: string,
 ): Promise<void> {
-  const config = getModelConfig(input.modelProvider, input.modelName);
+  const config = await getModelConfig(input.modelProvider, input.modelName);
   const threshold = getCompactionThreshold(config);
 
   if (activeCompactions.has(sessionId)) {
@@ -1066,7 +1095,7 @@ async function compactSession(
       return;
     }
 
-    const config = getModelConfig(input.modelProvider, input.modelName);
+    const config = await getModelConfig(input.modelProvider, input.modelName);
     const model = createModel(config, 'compaction');
 
     const summaryPrompt = buildSummaryPrompt(older);
@@ -1383,7 +1412,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       'Agent run starting',
     );
 
-    validateRequestedModel(input);
+    await validateRequestedModel(input);
 
     if (!input.modelProvider) input.modelProvider = DEFAULT_MODEL_PROVIDER;
     if (!input.modelName) input.modelName = DEFAULT_MODEL_NAME;
