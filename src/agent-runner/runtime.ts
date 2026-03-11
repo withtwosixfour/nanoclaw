@@ -43,7 +43,6 @@ import {
   detectAndLoadImages,
   extractImagePathsFromMediaNotes,
 } from '../attachments/images';
-import { pruneToolOutputs } from '../context/prune';
 import { Name } from 'drizzle-orm';
 
 const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
@@ -663,11 +662,6 @@ async function runQuery(
         const lastAssistant = responseMessages
           .filter((m) => m.role === 'assistant')
           .pop();
-
-        // Fire and forget - don't block on pruning
-        pruneToolOutputs(input.chatJid, sessionId).catch((err) => {
-          logger.warn({ jid: input.chatJid, sessionId, err }, 'Pruning failed');
-        });
 
         // Check for mid-stream overflow
         const threshold = getCompactionThreshold(config);

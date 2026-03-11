@@ -1737,13 +1737,19 @@ describe('loadMessages with compaction', () => {
     const { loadMessages } = await import('../agent-runner/session-store.js');
     const messages = await loadMessages(jid, sessionId);
 
-    // The compacted Q1 tool message is excluded, and the remaining Q2 tool
-    // message is also dropped because it no longer has a matching assistant tool call.
-    expect(messages.length).toBe(2);
+    // Should return 3 messages: Q1 user (not compacted) + Q2 user + Q2 tool
+    // Note: Tool pruning only marks tool messages as compacted, not user messages
+    expect(messages.length).toBe(3);
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toBe('Q1');
     expect(messages[1].role).toBe('user');
     expect(messages[1].content).toBe('Q2');
+    expect(messages[2].role).toBe('tool');
+    // Q2 tool should have tool results (not compacted)
+    expect(Array.isArray(messages[2].content)).toBe(true);
+    expect(messages[2].content.length).toBe(1);
+    const toolResult = messages[2].content[0] as { toolName: string };
+    expect(toolResult.toolName).toBe('read_file');
   });
 
   it('loadMessages should exclude isCompactedSummary messages', async () => {
@@ -1796,8 +1802,8 @@ describe('loadMessages with compaction', () => {
     const { loadMessages } = await import('../agent-runner/session-store.js');
     const messages = await loadMessages(jid, sessionId);
 
-    // The summary is excluded, and the orphan tool result is dropped during repair.
-    expect(messages.length).toBe(1);
+    // Should exclude the summary message
+    expect(messages.length).toBe(2);
     expect(messages.some((m: { role: string }) => m.role === 'system')).toBe(
       false,
     );

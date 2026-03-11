@@ -10,7 +10,6 @@ import { db } from '../db/main/client.js';
 import { conversationHistory } from '../db/main/schema.js';
 import {
   deserializeStoredMessage,
-  repairMessageHistory,
   serializeMessageForStorage,
 } from './message-store.js';
 
@@ -131,14 +130,12 @@ export async function loadMessages(
     )
     .orderBy(conversationHistory.id);
 
-  const messages = rows.map((row) => {
+  return rows.map((row) => {
     if (!row.message) {
       throw new Error('Conversation history row missing canonical message');
     }
     return deserializeStoredMessage(row.message);
   });
-
-  return repairMessageHistory(messages);
 }
 
 export async function saveMessage(

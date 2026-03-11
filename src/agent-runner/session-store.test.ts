@@ -250,7 +250,7 @@ describe('session-store canonical message storage', () => {
     });
   });
 
-  it('drops orphan assistant tool calls when loading history', async () => {
+  it('preserves orphan assistant tool calls until compaction rewrites history', async () => {
     const sessionId = `session-orphan-${Date.now()}-${Math.random()}`;
     await db.insert(conversationHistory).values({
       sessionId,
@@ -281,7 +281,15 @@ describe('session-store canonical message storage', () => {
     expect(messages).toEqual([
       {
         role: 'assistant',
-        content: 'Started work.',
+        content: [
+          { type: 'text', text: 'Started work.' },
+          {
+            type: 'tool-call',
+            toolCallId: 'call-orphan',
+            toolName: 'create_or_update_agent',
+            input: { id: 'agent-orphan' },
+          },
+        ],
       },
     ]);
   });
