@@ -79,6 +79,10 @@ let openRouterCatalogCache: OpenRouterCatalogCache | null = null;
 let openRouterCatalogPromise: Promise<Record<string, ModelConfig>> | null =
   null;
 
+function hasOpenRouterApiKey(): boolean {
+  return Boolean(process.env.OPENROUTER_API_KEY);
+}
+
 function cloneModelConfig(config: ModelConfig): ModelConfig {
   return { ...config };
 }
@@ -202,6 +206,10 @@ async function fetchOpenRouterCatalog(): Promise<Record<string, ModelConfig>> {
     return configs;
   } catch (error) {
     if (openRouterCatalogCache) {
+      openRouterCatalogCache = {
+        ...openRouterCatalogCache,
+        fetchedAt: Date.now(),
+      };
       return openRouterCatalogCache.models;
     }
 
@@ -213,6 +221,10 @@ async function fetchOpenRouterCatalog(): Promise<Record<string, ModelConfig>> {
 }
 
 async function getOpenRouterCatalog(): Promise<Record<string, ModelConfig>> {
+  if (!hasOpenRouterApiKey()) {
+    return openRouterCatalogCache?.models ?? {};
+  }
+
   if (
     openRouterCatalogCache &&
     Date.now() - openRouterCatalogCache.fetchedAt < OPENROUTER_CACHE_TTL_MS
@@ -233,6 +245,10 @@ async function getAllModelConfigs(): Promise<Record<string, ModelConfig>> {
   const configs: Record<string, ModelConfig> = {
     ...getStaticModelConfigs(),
   };
+
+  if (!hasOpenRouterApiKey() && !openRouterCatalogCache) {
+    return configs;
+  }
 
   const openRouterModels = await getOpenRouterCatalog();
   return {
@@ -278,18 +294,15 @@ export async function getModelConfig(
   if (provider === OPENROUTER_PROVIDER) {
     const configs = await getOpenRouterCatalog();
     const config = configs[`${provider}:${modelName}`];
-    if (!config) {
-      throw new Error(`Unknown model selection: ${provider}:${modelName}`);
-    }
-    return cloneModelConfig(config);
+    return config
+      ? cloneModelConfig(config)
+      : cloneModelConfig(DEFAULT_MODEL_CONFIG);
   }
 
   const config = getStaticModelConfigs()[`${provider}:${modelName}`];
-  if (!config) {
-    throw new Error(`Unknown model selection: ${provider}:${modelName}`);
-  }
-
-  return cloneModelConfig(config);
+  return config
+    ? cloneModelConfig(config)
+    : cloneModelConfig(DEFAULT_MODEL_CONFIG);
 }
 
 export function getCompactionThreshold(config: ModelConfig): number {

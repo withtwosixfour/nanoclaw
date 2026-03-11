@@ -60,7 +60,21 @@ describe('model-config', () => {
     });
   });
 
+  it('does not fetch OpenRouter models when no API key is configured', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const models = await getAvailableModels();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(models.some((model) => model.provider === 'opencode-zen')).toBe(
+      true,
+    );
+  });
+
   it('discovers only tool-capable OpenRouter models', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+
     mockFetchOnce({
       data: [
         {
@@ -96,6 +110,8 @@ describe('model-config', () => {
   });
 
   it('falls back to cached OpenRouter models when refresh fails', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
+
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({
@@ -128,13 +144,31 @@ describe('model-config', () => {
       true,
     );
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockReturnValueOnce(10 * 60 * 1000 + 1);
+    expect(await isModelConfigured('openrouter', 'openai/gpt-4.1-mini')).toBe(
+      true,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('throws when OpenRouter cannot be loaded without a cache', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-key';
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('boom')));
 
     await expect(
       isModelConfigured('openrouter', 'anthropic/claude-sonnet-4'),
     ).rejects.toThrow('Unable to load OpenRouter models');
+  });
+
+  it('falls back to the default model for unknown model selections', async () => {
+    expect(
+      await getModelConfig('opencode-zen', 'does-not-exist'),
+    ).toMatchObject({
+      provider: 'opencode-zen',
+      modelName: 'kimi-k2.5',
+      contextWindow: 200000,
+      supportsVision: true,
+    });
   });
 });
