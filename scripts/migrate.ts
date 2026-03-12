@@ -1,7 +1,7 @@
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql/node';
-import { eq, sql } from 'drizzle-orm';
+import { eq, isNull, sql } from 'drizzle-orm';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,6 +10,10 @@ import * as mainSchema from '../src/db/main/schema.js';
 import * as sessionSchema from '../src/db/sessions/schema.js';
 import { logger } from '../src/logger.js';
 import { db as mainDb } from '../src/db/main/client.js';
+import {
+  convertLegacyRowToMessage,
+  serializeMessageForStorage,
+} from '../src/agent-runner/message-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -167,14 +171,24 @@ export async function migrateSessionDataToMainDb(): Promise<void> {
       // Insert into main DB within a transaction for atomicity
       await mainDb.transaction(async (tx) => {
         for (const row of rows) {
+          const message = serializeMessageForStorage(
+            convertLegacyRowToMessage({
+              role: row.role,
+              content: row.content,
+              toolCalls: row.toolCalls,
+              toolResults: row.toolResults,
+            }),
+          );
+
           await tx.insert(mainSchema.conversationHistory).values({
             sessionId: row.sessionId,
             jid: jid,
             agentId: agentId,
             role: row.role as 'user' | 'assistant' | 'system' | 'tool',
-            content: row.content,
-            toolCalls: row.toolCalls,
-            toolResults: row.toolResults,
+            message,
+            content: null,
+            toolCalls: null,
+            toolResults: null,
             tokenCount: row.tokenCount,
             createdAt: row.createdAt,
             isCompacted: row.isCompacted,
@@ -200,6 +214,58 @@ export async function migrateSessionDataToMainDb(): Promise<void> {
   logger.info('Session data migration complete');
 }
 
+async function backfillConversationMessages(): Promise<void> {
+  const legacyRows = await mainDb
+    .select({
+      id: mainSchema.conversationHistory.id,
+      role: mainSchema.conversationHistory.role,
+      content: mainSchema.conversationHistory.content,
+      toolCalls: mainSchema.conversationHistory.toolCalls,
+      toolResults: mainSchema.conversationHistory.toolResults,
+    })
+    .from(mainSchema.conversationHistory)
+    .where(isNull(mainSchema.conversationHistory.message))
+    .orderBy(mainSchema.conversationHistory.id);
+
+  if (legacyRows.length === 0) {
+    logger.debug('No legacy conversation rows to backfill');
+    return;
+  }
+
+  logger.info(
+    { count: legacyRows.length },
+    'Backfilling canonical conversation messages',
+  );
+
+  await mainDb.transaction(async (tx) => {
+    for (const row of legacyRows) {
+      const message = serializeMessageForStorage(
+        convertLegacyRowToMessage({
+          role: row.role,
+          content: row.content,
+          toolCalls: row.toolCalls,
+          toolResults: row.toolResults,
+        }),
+      );
+
+      await tx
+        .update(mainSchema.conversationHistory)
+        .set({
+          message,
+          content: null,
+          toolCalls: null,
+          toolResults: null,
+        })
+        .where(eq(mainSchema.conversationHistory.id, row.id));
+    }
+  });
+
+  logger.info(
+    { count: legacyRows.length },
+    'Backfilled canonical conversation messages',
+  );
+}
+
 /**
  * Run all migrations (main + migrate session data)
  * Call this on startup
@@ -210,6 +276,8 @@ export async function runMigrations(): Promise<void> {
   try {
     // Migrate main database (this creates the conversation_history table)
     await migrateMainDb();
+
+    await backfillConversationMessages();
 
     // Migrate data from old session databases to main DB
     await migrateSessionDataToMainDb();

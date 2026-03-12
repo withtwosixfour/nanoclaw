@@ -16,8 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "add-channel": "tsx scripts/add-channel.ts",
-    "generate": "cd ./src/db/main && drizzle-kit generate && cd ../sessions && drizzle-kit generate && cd ../../../",
-    "migrate": "cd ./src/db/main && drizzle-kit migrate && cd ../sessions && drizzle-kit migrate && cd ../../../",
+    "generate": "cd ./src/db/main && drizzle-kit generate",
+    "migrate": "cd ./src/db/main && drizzle-kit migrate",
     "postinstall": "patch-package"
   },
   "dependencies": {

@@ -72,6 +72,10 @@ const mockConfig = {
 
 // Now import the modules that depend on config
 import { pruneToolOutputs, shouldPrune, PruneResult } from './prune.js';
+import {
+  convertLegacyRowToMessage,
+  serializeMessageForStorage,
+} from '../agent-runner/message-store.js';
 import { db } from '../db/main/client.js';
 import { conversationHistory } from '../db/main/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -86,8 +90,17 @@ function cleanup(projectDir: string): void {
 }
 
 function createMockToolResult(toolName: string, contentLength: number): string {
-  const content = 'x'.repeat(contentLength);
-  return JSON.stringify([{ toolName, content, success: true }]);
+  const output = 'x'.repeat(contentLength);
+  return JSON.stringify([
+    {
+      type: 'tool-result',
+      toolCallId: `${toolName}-call-1`,
+      toolName,
+      input: {},
+      output,
+      dynamic: true,
+    },
+  ]);
 }
 
 function createLargeToolResult(toolName: string, targetTokens: number): string {
@@ -109,15 +122,16 @@ interface TestMessage {
 }
 
 async function setupTestDb(messages: TestMessage[]): Promise<void> {
-  // Ensure table exists (create if not exists)
   const sqlite = (db as any).$client;
+  await sqlite.execute('DROP TABLE IF EXISTS conversation_history;');
   await sqlite.execute(`
-    CREATE TABLE IF NOT EXISTS conversation_history (
+    CREATE TABLE conversation_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       jid TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       role TEXT NOT NULL,
+      message TEXT,
       content TEXT,
       tool_calls TEXT,
       tool_results TEXT,
@@ -129,25 +143,43 @@ async function setupTestDb(messages: TestMessage[]): Promise<void> {
       provider TEXT,
       model TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_history(session_id);
-    CREATE INDEX IF NOT EXISTS idx_conversation_jid ON conversation_history(jid);
-    CREATE INDEX IF NOT EXISTS idx_conversation_agent ON conversation_history(agent_id);
-    CREATE INDEX IF NOT EXISTS idx_conversation_created ON conversation_history(created_at);
-    CREATE INDEX IF NOT EXISTS idx_conversation_compacted ON conversation_history(session_id, is_compacted);
   `);
-
-  // Clear existing data
-  await db.delete(conversationHistory);
+  await sqlite.execute(
+    'CREATE INDEX idx_conversation_session ON conversation_history(session_id);',
+  );
+  await sqlite.execute(
+    'CREATE INDEX idx_conversation_jid ON conversation_history(jid);',
+  );
+  await sqlite.execute(
+    'CREATE INDEX idx_conversation_agent ON conversation_history(agent_id);',
+  );
+  await sqlite.execute(
+    'CREATE INDEX idx_conversation_created ON conversation_history(created_at);',
+  );
+  await sqlite.execute(
+    'CREATE INDEX idx_conversation_compacted ON conversation_history(session_id, is_compacted);',
+  );
 
   // Insert test messages
   for (const msg of messages) {
+    const message = serializeMessageForStorage(
+      convertLegacyRowToMessage({
+        role: msg.role,
+        content: msg.content ?? null,
+        toolCalls: null,
+        toolResults: msg.toolResults ?? null,
+      }),
+    );
+
     await db.insert(conversationHistory).values({
       sessionId: msg.sessionId,
       jid: msg.jid,
       agentId: msg.agentId,
       role: msg.role as 'user' | 'assistant' | 'system' | 'tool',
-      content: msg.content,
-      toolResults: msg.toolResults,
+      message,
+      content: null,
+      toolCalls: null,
+      toolResults: null,
       createdAt: msg.createdAt,
       isCompacted: msg.isCompacted || false,
       compactedAt: msg.compactedAt,
@@ -999,7 +1031,17 @@ describe('shouldPrune', () => {
       jid,
       agentId,
       role: 'tool',
-      toolResults: largeToolResult,
+      message: serializeMessageForStorage(
+        convertLegacyRowToMessage({
+          role: 'tool',
+          content: null,
+          toolCalls: null,
+          toolResults: largeToolResult,
+        }),
+      ),
+      content: null,
+      toolCalls: null,
+      toolResults: null,
       createdAt: '2024-01-01T00:00:02Z',
       tokenCount: null,
     });
@@ -1767,7 +1809,7 @@ describe('loadMessages with compaction', () => {
     );
   });
 
-  it('reproduces the issue: large tool results cause context overflow even after compaction', async () => {
+  it('prevents recent large tool results from causing context overflow after truncation', async () => {
     // Simulate the real issue: massive tool results in recent messages
     const massiveToolResult = createLargeToolResult('read_file', 100000); // 100K tokens = 400K chars
     const normalToolResult = createLargeToolResult('read_file', 5000);
@@ -1823,8 +1865,7 @@ describe('loadMessages with compaction', () => {
     // Calculate total tokens that would be loaded
     const rows = await db
       .select({
-        contentLength: conversationHistory.content,
-        toolResultsLength: conversationHistory.toolResults,
+        messageLength: conversationHistory.message,
       })
       .from(conversationHistory)
       .where(
@@ -1837,18 +1878,13 @@ describe('loadMessages with compaction', () => {
 
     let totalChars = 0;
     for (const row of rows) {
-      totalChars +=
-        (row.contentLength?.length || 0) + (row.toolResultsLength?.length || 0);
+      totalChars += row.messageLength?.length || 0;
     }
     const estimatedTokens = Math.ceil(totalChars / 4);
 
-    // The massive tool result alone is 100K tokens
-    // This demonstrates the issue: even after filtering out compacted messages,
-    // we still have ~100K tokens just from the one massive tool result
-    expect(estimatedTokens).toBeGreaterThan(80000); // Massive tool is 100K, we expect at least 80K after filtering
-
-    // The fix would be to also prune tool results in recent messages,
-    // or to use a smarter loading strategy that excludes tool_results from the context
+    // The canonical message store truncates oversized tool outputs before saving,
+    // so recent tool messages no longer blow up the estimated context size.
+    expect(estimatedTokens).toBeLessThan(1000);
   });
 
   it('truncates tool outputs and provides read instructions', async () => {

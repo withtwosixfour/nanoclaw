@@ -180,6 +180,7 @@ export const conversationHistory = sqliteTable(
     jid: text('jid').notNull(),
     agentId: text('agent_id').notNull(),
     role: text('role').notNull(), // 'user', 'assistant', 'system', 'tool'
+    message: text('message'),
     content: text('content'),
     toolCalls: text('tool_calls'),
     toolResults: text('tool_results'),

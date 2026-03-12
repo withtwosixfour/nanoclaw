@@ -37,13 +37,13 @@ import {
   replaceSessionMessages,
   saveCompactionOutput,
 } from './session-store';
+import { repairMessageHistory } from './message-store.js';
 import { truncateOutput } from '../context/truncate';
 import { getRouteInfo } from '../router';
 import {
   detectAndLoadImages,
   extractImagePathsFromMediaNotes,
 } from '../attachments/images';
-import { pruneToolOutputs } from '../context/prune';
 import { Name } from 'drizzle-orm';
 
 const DEFAULT_MODEL_PROVIDER = 'opencode-zen';
@@ -692,11 +692,6 @@ async function runQuery(
           .filter((m) => m.role === 'assistant')
           .pop();
 
-        // Fire and forget - don't block on pruning
-        pruneToolOutputs(input.chatJid, sessionId).catch((err) => {
-          logger.warn({ jid: input.chatJid, sessionId, err }, 'Pruning failed');
-        });
-
         // Check for mid-stream overflow
         const threshold = getCompactionThreshold(config);
         getSessionTokenCount(input.chatJid, sessionId).then((tokenCount) => {
@@ -1137,7 +1132,9 @@ async function compactSession(
     // Filter out tool messages from recent to prevent context overflow
     // Tool results in recent messages can be massive and cause the prompt to exceed limits
     // The summary already captures what was done, so we don't need the full tool outputs
-    const filteredRecent = recent.filter((msg) => msg.role !== 'tool');
+    const filteredRecent = repairMessageHistory(
+      recent.filter((msg) => msg.role !== 'tool'),
+    );
 
     // Replace messages: summary + filtered recent (without tool messages)
     await replaceSessionMessages(input.chatJid, input.agentId, sessionId, [

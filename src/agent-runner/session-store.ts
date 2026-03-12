@@ -1,20 +1,17 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { eq, and, or, isNull, sql } from 'drizzle-orm';
-import type {
-  JSONValue,
-  ModelMessage,
-  TextPart,
-  ToolCallPart,
-  ToolResultPart,
-} from 'ai';
+import { eq, and, or, sql } from 'drizzle-orm';
+import type { ModelMessage } from 'ai';
 
 import { getSessionPath, getAgentPath } from '../router.js';
 import { logger } from '../logger.js';
 import { db } from '../db/main/client.js';
 import { conversationHistory } from '../db/main/schema.js';
-import { truncateOutput } from '../context/truncate.js';
+import {
+  deserializeStoredMessage,
+  serializeMessageForStorage,
+} from './message-store.js';
 
 const COMPACTIONS_DIR = '.compactions';
 
@@ -114,10 +111,7 @@ export async function loadMessages(
 ): Promise<ModelMessage[]> {
   const rows = await db
     .select({
-      role: conversationHistory.role,
-      content: conversationHistory.content,
-      toolCalls: conversationHistory.toolCalls,
-      toolResults: conversationHistory.toolResults,
+      message: conversationHistory.message,
     })
     .from(conversationHistory)
     .where(
@@ -136,7 +130,12 @@ export async function loadMessages(
     )
     .orderBy(conversationHistory.id);
 
-  return rows.map((row) => deserializeMessage(row));
+  return rows.map((row) => {
+    if (!row.message) {
+      throw new Error('Conversation history row missing canonical message');
+    }
+    return deserializeStoredMessage(row.message);
+  });
 }
 
 export async function saveMessage(
@@ -146,16 +145,17 @@ export async function saveMessage(
   message: ModelMessage,
   tokenCount?: number | null,
 ): Promise<void> {
-  const { role, content, toolCalls, toolResults } = serializeMessage(message);
+  const normalizedMessage = serializeMessageForStorage(message);
 
   await db.insert(conversationHistory).values({
     sessionId,
     jid,
     agentId,
-    role,
-    content,
-    toolCalls,
-    toolResults,
+    role: message.role,
+    message: normalizedMessage,
+    content: null,
+    toolCalls: null,
+    toolResults: null,
     tokenCount: tokenCount ?? null,
     createdAt: new Date().toISOString(),
   });
@@ -242,16 +242,15 @@ export async function replaceSessionMessages(
 
     // Insert new messages
     for (const message of messages) {
-      const { role, content, toolCalls, toolResults } =
-        serializeMessage(message);
       await tx.insert(conversationHistory).values({
         sessionId,
         jid,
         agentId,
-        role,
-        content,
-        toolCalls,
-        toolResults,
+        role: message.role,
+        message: serializeMessageForStorage(message),
+        content: null,
+        toolCalls: null,
+        toolResults: null,
         tokenCount: null,
         createdAt: now,
       });
@@ -278,203 +277,4 @@ export async function markMessageCompacted(
         sql`(${conversationHistory.isCompacted} IS NULL OR ${conversationHistory.isCompacted} = FALSE)`,
       ),
     );
-}
-
-function serializeMessage(message: ModelMessage): {
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string | null;
-  toolCalls: string | null;
-  toolResults: string | null;
-} {
-  const role = message.role as 'user' | 'assistant' | 'system' | 'tool';
-  const content = extractContentText(message);
-  const toolCalls =
-    role === 'assistant' && Array.isArray(message.content)
-      ? serializeToolCalls(message.content)
-      : null;
-
-  // For tool messages, truncate the output before saving to prevent DB bloat
-  let toolResults: string | null = null;
-  if (role === 'tool' && Array.isArray(message.content)) {
-    const truncatedContent = message.content.map((part) => {
-      if (isToolResultPart(part) && typeof part.output === 'string') {
-        // Truncate the tool output and save full version to disk
-        const truncateResult = truncateOutput(part.output, {
-          maxLines: 500,
-          maxBytes: 100 * 1024, // 100KB
-          direction: 'head',
-        });
-
-        return {
-          ...part,
-          output: truncateResult.content,
-        };
-      }
-      return part;
-    });
-    toolResults = JSON.stringify(truncatedContent);
-  } else if (role === 'tool') {
-    toolResults = JSON.stringify(message.content ?? []);
-  }
-
-  return {
-    role,
-    content,
-    toolCalls,
-    toolResults,
-  };
-}
-
-function deserializeMessage(row: {
-  role: string;
-  content: string | null;
-  toolCalls: string | null;
-  toolResults: string | null;
-}): ModelMessage {
-  if (row.role === 'tool') {
-    const toolResults = normalizeToolResults(row.toolResults);
-
-    // Truncate tool results at load time to prevent context overflow
-    // This handles both new and existing messages in the database
-    const truncatedResults: ToolResultPart[] = toolResults.map((part) => {
-      if (isToolResultPart(part) && typeof part.output === 'string') {
-        // Truncate large outputs and save full version to disk
-        const truncateResult = truncateOutput(part.output, {
-          maxLines: 500,
-          maxBytes: 100 * 1024, // 100KB
-          direction: 'head',
-        });
-
-        return {
-          ...part,
-          output: truncateResult.content,
-        } as unknown as ToolResultPart;
-      }
-      return part;
-    });
-
-    return {
-      role: 'tool',
-      content: truncatedResults,
-    };
-  }
-
-  const message: ModelMessage = {
-    role: row.role as 'user' | 'assistant' | 'system',
-    content: row.content || '',
-  };
-
-  if (row.toolCalls) {
-    (message as { toolCalls?: unknown }).toolCalls = JSON.parse(row.toolCalls);
-  }
-
-  return message;
-}
-
-function extractContentText(message: ModelMessage): string | null {
-  const content = message.content;
-  if (typeof content === 'string') return content;
-  if (!content) return null;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (isTextPart(part)) {
-          return part.text ?? '';
-        }
-        if (isToolResultPart(part)) {
-          return toolOutputToText(part.output);
-        }
-        return '';
-      })
-      .join('')
-      .trim();
-  }
-  return String(content);
-}
-
-function serializeToolCalls(
-  parts: Array<ModelMessage['content'][number]>,
-): string {
-  const toolCalls = parts.filter(isToolCallPart).map((part) => ({
-    toolName: part.toolName,
-    toolCallId: part.toolCallId,
-    input: part.input,
-  }));
-  return JSON.stringify(toolCalls);
-}
-
-function normalizeToolResults(toolResults: any): ToolResultPart[] {
-  if (!toolResults) return [];
-  try {
-    return JSON.parse(toolResults) as ToolResultPart[];
-  } catch (e) {
-    logger.error(
-      { err: JSON.stringify(e, Object.keys(e as any)) },
-      'Error normalizing tool calls',
-    );
-    throw e;
-  }
-}
-
-function toolOutputToText(output: JSONValue | unknown): string {
-  if (typeof output === 'string') return output;
-  try {
-    return JSON.stringify(redactImageDataPayloads(output));
-  } catch {
-    return String(output ?? '');
-  }
-}
-
-function redactImageDataPayloads(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => redactImageDataPayloads(item));
-  }
-
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-
-  const record = value as Record<string, unknown>;
-
-  if (record.type === 'image-data' && typeof record.data === 'string') {
-    return {
-      ...record,
-      data: '[image-data omitted]',
-      dataBytes: Buffer.byteLength(record.data, 'utf-8'),
-    };
-  }
-
-  const redacted: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(record)) {
-    redacted[key] = redactImageDataPayloads(child);
-  }
-
-  return redacted;
-}
-
-function isTextPart(part: ModelMessage['content'][number]): part is TextPart {
-  if (!part || typeof part !== 'object') return false;
-  return part.type === 'text' && typeof part.text === 'string';
-}
-
-function isToolCallPart(
-  part: ModelMessage['content'][number],
-): part is ToolCallPart {
-  if (!part || typeof part !== 'object') return false;
-  return (
-    part.type === 'tool-call' &&
-    typeof part.toolName === 'string' &&
-    typeof part.toolCallId === 'string'
-  );
-}
-
-function isToolResultPart(
-  part: ModelMessage['content'][number],
-): part is ToolResultPart {
-  if (!part || typeof part !== 'object') return false;
-  return (
-    part.type === 'tool-result' &&
-    typeof part.toolName === 'string' &&
-    typeof part.toolCallId === 'string'
-  );
 }

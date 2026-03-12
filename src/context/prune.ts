@@ -2,6 +2,11 @@ import { eq, and, sql } from 'drizzle-orm';
 import { db } from '../db/main/client.js';
 import { conversationHistory } from '../db/main/schema.js';
 import { logger } from '../logger.js';
+import {
+  deserializeStoredMessage,
+  getToolNames,
+  getToolPayloadForPruning,
+} from '../agent-runner/message-store.js';
 import { estimateTokens } from './token.js';
 
 // Thresholds (from opencode)
@@ -37,8 +42,7 @@ export async function pruneToolOutputs(
   const rows = await db
     .select({
       id: conversationHistory.id,
-      role: conversationHistory.role,
-      toolResults: conversationHistory.toolResults,
+      message: conversationHistory.message,
       isCompacted: conversationHistory.isCompacted,
       compactedAt: conversationHistory.compactedAt,
     })
@@ -54,7 +58,13 @@ export async function pruneToolOutputs(
   // Walk backwards through messages
   loop: for (const row of rows) {
     // Count user turns (protect last 2)
-    if (row.role === 'user') {
+    if (!row.message) {
+      continue;
+    }
+
+    const message = deserializeStoredMessage(row.message);
+
+    if (message.role === 'user') {
       turns++;
     }
     if (turns < 2) {
@@ -67,21 +77,22 @@ export async function pruneToolOutputs(
     }
 
     // Process tool results
-    if (row.role === 'tool' && row.toolResults) {
+    if (message.role === 'tool') {
       try {
-        // Check if this is a protected tool
-        const toolResults = JSON.parse(row.toolResults) as Array<{
-          toolName: string;
-        }>;
-        const isProtected = toolResults.some((result) =>
-          PRUNE_PROTECTED_TOOLS.includes(result.toolName),
+        const toolPayload = getToolPayloadForPruning(message);
+        if (!toolPayload) {
+          continue;
+        }
+
+        const isProtected = getToolNames(message).some((toolName) =>
+          PRUNE_PROTECTED_TOOLS.includes(toolName),
         );
         if (isProtected) {
           continue;
         }
 
         // Estimate tokens in this tool result
-        const estimate = estimateTokens(row.toolResults);
+        const estimate = estimateTokens(toolPayload);
         total += estimate;
 
         // If we've exceeded the protection threshold, mark for pruning
@@ -143,7 +154,7 @@ export async function shouldPrune(
 ): Promise<boolean> {
   const rows = await db
     .select({
-      toolResults: conversationHistory.toolResults,
+      message: conversationHistory.message,
     })
     .from(conversationHistory)
     .where(
@@ -157,11 +168,19 @@ export async function shouldPrune(
 
   let totalTokens = 0;
   for (const row of rows) {
-    if (row.toolResults) {
-      totalTokens += estimateTokens(row.toolResults);
-      if (totalTokens >= threshold) {
-        return true;
-      }
+    if (!row.message) {
+      continue;
+    }
+
+    const message = deserializeStoredMessage(row.message);
+    const toolPayload = getToolPayloadForPruning(message);
+    if (!toolPayload) {
+      continue;
+    }
+
+    totalTokens += estimateTokens(toolPayload);
+    if (totalTokens >= threshold) {
+      return true;
     }
   }
 

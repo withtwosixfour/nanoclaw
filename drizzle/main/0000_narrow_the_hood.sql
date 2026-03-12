@@ -54,6 +54,30 @@ CREATE TABLE `chats` (
 );
 --> statement-breakpoint
 CREATE INDEX `idx_chats_last_message_time` ON `chats` (`last_message_time`);--> statement-breakpoint
+CREATE TABLE `conversation_history` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`session_id` text NOT NULL,
+	`jid` text NOT NULL,
+	`agent_id` text NOT NULL,
+	`role` text NOT NULL,
+	`message` text,
+	`content` text,
+	`tool_calls` text,
+	`tool_results` text,
+	`token_count` integer,
+	`created_at` text NOT NULL,
+	`is_compacted` integer DEFAULT false,
+	`compacted_at` text,
+	`is_compacted_summary` integer DEFAULT false,
+	`provider` text,
+	`model` text
+);
+--> statement-breakpoint
+CREATE INDEX `idx_conversation_session` ON `conversation_history` (`session_id`);--> statement-breakpoint
+CREATE INDEX `idx_conversation_jid` ON `conversation_history` (`jid`);--> statement-breakpoint
+CREATE INDEX `idx_conversation_agent` ON `conversation_history` (`agent_id`);--> statement-breakpoint
+CREATE INDEX `idx_conversation_created` ON `conversation_history` (`created_at`);--> statement-breakpoint
+CREATE INDEX `idx_conversation_compacted` ON `conversation_history` (`session_id`,`is_compacted`);--> statement-breakpoint
 CREATE TABLE `messages` (
 	`id` text NOT NULL,
 	`chat_jid` text NOT NULL,
@@ -122,4 +146,47 @@ CREATE TABLE `task_run_logs` (
 	FOREIGN KEY (`task_id`) REFERENCES `scheduled_tasks`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
-CREATE INDEX `idx_task_run_logs` ON `task_run_logs` (`task_id`,`run_at`);
+CREATE INDEX `idx_task_run_logs` ON `task_run_logs` (`task_id`,`run_at`);--> statement-breakpoint
+CREATE TABLE `voice_participants` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`voice_session_id` text NOT NULL,
+	`participant_id` text NOT NULL,
+	`display_name` text NOT NULL,
+	`joined_at` text NOT NULL,
+	`left_at` text,
+	FOREIGN KEY (`voice_session_id`) REFERENCES `voice_sessions`(`voice_session_id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `idx_voice_participants_session_participant` ON `voice_participants` (`voice_session_id`,`participant_id`);--> statement-breakpoint
+CREATE TABLE `voice_sessions` (
+	`voice_session_id` text PRIMARY KEY NOT NULL,
+	`platform` text NOT NULL,
+	`platform_session_id` text NOT NULL,
+	`route_key` text NOT NULL,
+	`agent_id` text NOT NULL,
+	`effective_prompt` text NOT NULL,
+	`status` text NOT NULL,
+	`started_by` text,
+	`started_at` text NOT NULL,
+	`ended_at` text,
+	`linked_text_thread_id` text,
+	`linked_text_session_id` text,
+	`metadata_json` text,
+	FOREIGN KEY (`agent_id`) REFERENCES `agents`(`id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `idx_voice_sessions_platform` ON `voice_sessions` (`platform`);--> statement-breakpoint
+CREATE INDEX `idx_voice_sessions_route` ON `voice_sessions` (`route_key`);--> statement-breakpoint
+CREATE INDEX `idx_voice_sessions_status` ON `voice_sessions` (`status`);--> statement-breakpoint
+CREATE INDEX `idx_voice_sessions_started_at` ON `voice_sessions` (`started_at`);--> statement-breakpoint
+CREATE TABLE `voice_transcripts` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`voice_session_id` text NOT NULL,
+	`participant_id` text,
+	`role` text NOT NULL,
+	`content` text NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`voice_session_id`) REFERENCES `voice_sessions`(`voice_session_id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `idx_voice_transcripts_session_created` ON `voice_transcripts` (`voice_session_id`,`created_at`);
