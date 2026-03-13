@@ -191,7 +191,7 @@ fi
 
 ${SUDO_U} npm install
 if [[ "${ENABLE_SLACK_SETUP}" == "true" ]]; then
-  LOG_LEVEL=debug ./node_modules/.bin/tsx scripts/setup-server/index.ts slack --env-file "${ENV_FILE}"
+  ${SUDO} env LOG_LEVEL=debug ./node_modules/.bin/tsx scripts/setup-server/index.ts slack --env-file "${ENV_FILE}"
   ${SUDO} chown -R "${USER_NAME}:${USER_NAME}" "${REPO_ROOT}/logs"
   ${SUDO} chown "${USER_NAME}:${USER_NAME}" "${ENV_FILE}"
 fi

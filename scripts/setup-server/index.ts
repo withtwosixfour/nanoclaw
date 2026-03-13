@@ -33,6 +33,12 @@ if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
 
 const envFile = args[envFileIndex + 1];
 
+if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+  throw new Error(
+    'Setup server must run as root so Certbot can bind port 80 and HTTPS can bind port 443.',
+  );
+}
+
 const env = await readEnvFile(envFile);
 const clientId = requireEnvValue(env, 'SLACK_CLIENT_ID');
 const clientSecret = requireEnvValue(env, 'SLACK_CLIENT_SECRET');
